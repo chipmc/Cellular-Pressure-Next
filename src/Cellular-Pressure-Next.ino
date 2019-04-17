@@ -375,7 +375,7 @@ void loop()
     if (verboseMode && state != oldState) publishStateTransition();
     if (millis() > resetTimeStamp + resetWait)
     {
-      if (Particle.connected()) Particle.publish("State","ERROR_STATE - Resetting");            // Reset time expired - time to go
+      if (Particle.connected()) Particle.publish("State","ERROR_STATE - Resetting", PRIVATE);            // Reset time expired - time to go
       delay(2000);
       FRAMwrite8(FRAM::alertsCountAddr,alerts);                       // Save counts in case of reset
       if (resetCount <= 3)  System.reset();                           // Today, only way out is reset
@@ -422,7 +422,7 @@ void recordCount() // This is where we check to see if an interrupt is set when 
       hourlyPersonCount -= currentMinuteCount;
       dailyPersonCount -= currentMinuteCount;
       currentMinuteCount = 0;
-      if (Particle.connected()) Particle.publish("Alert", "Exceeded Maxmin limit");
+      if (Particle.connected()) Particle.publish("Alert", "Exceeded Maxmin limit", PRIVATE);
       alerts++;
       FRAMwrite8(FRAM::alertsCountAddr,alerts);                       // Save counts in case of reset
     }
@@ -435,17 +435,17 @@ void recordCount() // This is where we check to see if an interrupt is set when 
     if (verboseMode && Particle.connected()) {
       char data[256];                                                   // Store the date in this character array - not global
       snprintf(data, sizeof(data), "Car, hourly: %i, daily: %i",hourlyPersonCount,dailyPersonCount);
-      Particle.publish("Count",data);                                   // Helpful for monitoring and calibration
+      Particle.publish("Count",data, PRIVATE);                                   // Helpful for monitoring and calibration
     }
   }
-  else if(verboseMode && Particle.connected()) Particle.publish("Event","Debounced");
+  else if(verboseMode && Particle.connected()) Particle.publish("Event","Debounced", PRIVATE);
 
   if (!digitalRead(userSwitch) && lowPowerMode) {                     // A low value means someone is pushing this button - will trigger a send to Ubidots and take out of low power mode
     Cellular.on();
     Particle.connect();
     waitFor(Particle.connected,60000);                                // Give us up to 60 seconds to connect
     Particle.process();
-    if (Particle.connected()) Particle.publish("Mode","Normal Operations");
+    if (Particle.connected()) Particle.publish("Mode","Normal Operations", PRIVATE);
     controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);      // Load the control register
     controlRegisterValue = (0b1111110 & controlRegisterValue);        // Will set the lowPowerMode bit to zero
     controlRegisterValue = (0b00010000 | controlRegisterValue);       // Turn on the connectionMode
@@ -476,16 +476,16 @@ void UbidotsHandler(const char *event, const char *data)              // Looks a
   char dataCopy[strlen(data)+1];                                      // data needs to be copied since if (Particle.connected()) Particle.publish() will clear it
   strncpy(dataCopy, data, sizeof(dataCopy));                          // Copy - overflow safe
   if (!strlen(dataCopy)) {                                            // First check to see if there is any data
-    if (Particle.connected()) Particle.publish("Ubidots Hook", "No Data");
+    if (Particle.connected()) Particle.publish("Ubidots Hook", "No Data", PRIVATE);
     return;
   }
   int responseCode = atoi(dataCopy);                                  // Response is only a single number thanks to Template
   if ((responseCode == 200) || (responseCode == 201))
   {
-    if (Particle.connected()) Particle.publish("State","Response Received");
+    if (Particle.connected()) Particle.publish("State","Response Received", PRIVATE);
     dataInFlight = false;                                             // Data has been received
   }
-  else if (Particle.connected()) Particle.publish("Ubidots Hook", dataCopy);                    // Publish the response code
+  else if (Particle.connected()) Particle.publish("Ubidots Hook", dataCopy, PRIVATE);                    // Publish the response code
 }
 
 // These are the functions that are part of the takeMeasurements call
@@ -626,7 +626,7 @@ int setDebounce(String command)                                       // This is
   snprintf(debounceStr,sizeof(debounceStr),"%2.1f sec",inputDebounce);
   if (verboseMode && Particle.connected()) {                                                  // Publish result if feeling verbose
     waitUntil(meterParticlePublish);
-    Particle.publish("Debounce",debounceStr);
+    Particle.publish("Debounce",debounceStr, PRIVATE);
     lastPublish = millis();
   }
   return 1;                                                           // Returns 1 to let the user know if was reset
@@ -661,7 +661,7 @@ int setSolarMode(String command) // Function to force sending data in current ho
     controlRegisterValue = (0b00000100 | controlRegisterValue);          // Turn on solarPowerMode
     FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);               // Write it to the register
     PMICreset();                                               // Change the power management Settings
-    if (Particle.connected()) Particle.publish("Mode","Set Solar Powered Mode");
+    if (Particle.connected()) Particle.publish("Mode","Set Solar Powered Mode", PRIVATE);
     return 1;
   }
   else if (command == "0")
@@ -671,7 +671,7 @@ int setSolarMode(String command) // Function to force sending data in current ho
     controlRegisterValue = (0b11111011 & controlRegisterValue);           // Turn off solarPowerMode
     FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);                // Write it to the register
     PMICreset();                                                // Change the power management settings
-    if (Particle.connected()) Particle.publish("Mode","Cleared Solar Powered Mode");
+    if (Particle.connected()) Particle.publish("Mode","Cleared Solar Powered Mode", PRIVATE);
     return 1;
   }
   else return 0;
@@ -685,7 +685,7 @@ int setVerboseMode(String command) // Function to force sending data in current 
     controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);
     controlRegisterValue = (0b00001000 | controlRegisterValue);                    // Turn on verboseMode
     FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);                        // Write it to the register
-    if (Particle.connected()) Particle.publish("Mode","Set Verbose Mode");
+    if (Particle.connected()) Particle.publish("Mode","Set Verbose Mode", PRIVATE);
     return 1;
   }
   else if (command == "0")
@@ -694,7 +694,7 @@ int setVerboseMode(String command) // Function to force sending data in current 
     controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);
     controlRegisterValue = (0b11110111 & controlRegisterValue);                    // Turn off verboseMode
     FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);                        // Write it to the register
-    if (Particle.connected()) Particle.publish("Mode","Cleared Verbose Mode");
+    if (Particle.connected()) Particle.publish("Mode","Cleared Verbose Mode", PRIVATE);
     return 1;
   }
   else return 0;
@@ -710,9 +710,9 @@ int setTimeZone(String command)
   Time.zone((float)tempTimeZoneOffset);
   FRAMwrite8(FRAM::timeZoneAddr,tempTimeZoneOffset);                             // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Time zone offset %i",tempTimeZoneOffset);
-  if (Particle.connected()) Particle.publish("Time",data);
+  if (Particle.connected()) Particle.publish("Time",data, PRIVATE);
   delay(1000);
-  if (Particle.connected()) Particle.publish("Time",Time.timeStr(t));
+  if (Particle.connected()) Particle.publish("Time",Time.timeStr(t), PRIVATE);
   return 1;
 }
 
@@ -725,7 +725,7 @@ int setOpenTime(String command)
   openTime = tempTime;
   FRAMwrite8(FRAM::openTimeAddr,openTime);                             // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Open time set to %i",openTime);
-  if (Particle.connected()) Particle.publish("Time",data);
+  if (Particle.connected()) Particle.publish("Time",data, PRIVATE);
   return 1;
 }
 
@@ -738,7 +738,7 @@ int setCloseTime(String command)
   closeTime = tempTime;
   FRAMwrite8(FRAM::closeTimeAddr,closeTime);                             // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Closing time set to %i",closeTime);
-  if (Particle.connected()) Particle.publish("Time",data);
+  if (Particle.connected()) Particle.publish("Time",data, PRIVATE);
   return 1;
 }
 
@@ -751,7 +751,7 @@ int setLowPowerMode(String command)                                   // This is
   {
     if (verboseMode && Particle.connected()) {
       waitUntil(meterParticlePublish);
-      Particle.publish("Mode","Low Power");
+      Particle.publish("Mode","Low Power", PRIVATE);
       lastPublish = millis();
     }
     if ((0b00010000 & controlRegisterValue)) {                        // If we are in connected mode
@@ -768,7 +768,7 @@ int setLowPowerMode(String command)                                   // This is
   {
     if (verboseMode && Particle.connected()) {
       waitUntil(meterParticlePublish);
-      Particle.publish("Mode","Normal Operations");
+      Particle.publish("Mode","Normal Operations", PRIVATE);
       lastPublish = millis();
     }
     if (!(0b00010000 & controlRegisterValue)) {
@@ -810,7 +810,7 @@ void publishStateTransition(void)
   oldState = state;
   if(Particle.connected()) {
     waitUntil(meterParticlePublish);
-    Particle.publish("State Transition",stateTransitionString);
+    Particle.publish("State Transition",stateTransitionString, PRIVATE);
     lastPublish = millis();
   }
   Serial.println(stateTransitionString);
