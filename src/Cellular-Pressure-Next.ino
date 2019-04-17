@@ -131,7 +131,7 @@ int stateOfCharge = 0;                              // stores battery charge lev
 
 // This section is where we will initialize sensor specific variables, libraries and function prototypes
 // Pressure Sensor Variables
-int debounce;                                       // This is the numerical value of debounce - in millis()
+u_int16_t debounce;                                       // This is the numerical value of debounce - in millis()
 char debounceStr[8] = "NA";                         // String to make debounce more readalbe on the mobile app
 volatile bool sensorDetect = false;                 // This is the flag that an interrupt is triggered
 unsigned long currentEvent = 0;                     // Time for the current sensor event
@@ -328,7 +328,7 @@ void loop()
 
   case NAPPING_STATE: {  // This state puts the device in low power mode quickly
     if (verboseMode && state != oldState) publishStateTransition();
-    if (pinReadFast(intPin)) break;                                   // Don't nap until we are done with event
+    if (sensorDetect) break;                                   // Don't nap until we are done with event
     if ((0b00010000 & controlRegisterValue)) {                        // If we are in connected mode
       Particle.disconnect();                                          // Otherwise Electron will attempt to reconnect on wake
       controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);    // Get the control register (general approach)
@@ -571,7 +571,7 @@ void connectToParticle() {
   Particle.connect();
   // wait for *up to* 5 minutes
   for (int retry = 0; retry < 30 && !waitFor(Particle.connected,10000); retry++) {
-    if(intFlag) recordCount(); // service the interrupt every 10 seconds
+    if(sensorDetect) recordCount(); // service the interrupt every 10 seconds
     Particle.process();
   }
 }
