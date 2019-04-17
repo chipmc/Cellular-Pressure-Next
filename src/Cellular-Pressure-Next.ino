@@ -131,7 +131,7 @@ int stateOfCharge = 0;                              // stores battery charge lev
 
 // This section is where we will initialize sensor specific variables, libraries and function prototypes
 // Pressure Sensor Variables
-u_int16_t debounce;                                       // This is the numerical value of debounce - in millis()
+u_int16_t debounce;                                 // This is the numerical value of debounce - in millis()
 char debounceStr[8] = "NA";                         // String to make debounce more readalbe on the mobile app
 volatile bool sensorDetect = false;                 // This is the flag that an interrupt is triggered
 unsigned long currentEvent = 0;                     // Time for the current sensor event
