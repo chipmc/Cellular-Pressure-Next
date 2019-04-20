@@ -22,10 +22,13 @@
 //v1.04b - Makes sure reset happens at 2300 hours - so Ubidots counts correctly
 //v1.05 - Updated the Signal reporting for the console / mobile app
 //v1.06 - Added ConnectionEVents from Rick's Electron Sample
-//v1.07 - Added the full electronsamepl suite of tests
+//v1.07 - Added the full electronsample suite of tests
 //v1.08 - Moved over to Rick's low battery checks - eliminated state
 //v1.09 - Took out connection check as it was causing hourly reboots
 //v1.10 - Added a syncTime instruction when there is a new day
+//v1.11 - Took our alert increment except in exceeing maxMinLimit
+//v1.12 - Took out App watchdog, session monitoring, added reset session on Webhook timeout and reset if more than 2 hrs on webhook 
+//v1.13 - Added some messaging to the ERROR_STATE
 
 
 
@@ -43,11 +46,12 @@ namespace FRAM {                                    // Moved to namespace instea
     currentCountsTimeAddr = 0xE,                    // Time of last count - 32 bits
     alertsCountAddr       = 0x12,                   // Current Hour Alerts Count
     maxMinLimitAddr       = 0x13,                   // Current value for MaxMin Limit
+    lastHookResponseAddr  = 0x14                    // When is the last time we got a valid Webhook Response
   };
 };
 
 const int versionNumber = 9;                        // Increment this number each time the memory map is changed
-const char releaseNumber[6] = "1.12";               // Displays the release on the menu ****  this is not a production release ****
+const char releaseNumber[6] = "1.13";               // Displays the release on the menu ****  this is not a production release ****
 
 // Included Libraries
 #include "Adafruit_FRAM_I2C.h"                      // Library for FRAM functions
@@ -55,8 +59,8 @@ const char releaseNumber[6] = "1.12";               // Displays the release on t
 #include "electrondoc.h"                            // Documents pinout
 #include "ConnectionEvents.h"                       // Stores information on last connection attemt in memory
 //#include "ConnectionCheck.h"                        // Tests connection
-#include "AppWatchdogWrapper.h"                     // Makes sure you don't leave the loop for more than a minute
-#include "SessionCheck.h"                           // Validates that your Particle session is valid
+//#include "AppWatchdogWrapper.h"                     // Makes sure you don't leave the loop for more than a minute
+//#include "SessionCheck.h"                           // Validates that your Particle session is valid
 #include "BatteryCheck.h"
 
 // Prototypes and System Mode calls
@@ -67,8 +71,8 @@ FuelGauge batteryMonitor;                           // Prototype for the fuel ga
 PMIC power;                                         //Initalize the PMIC class so you can call the Power Management functions below.
 ConnectionEvents connectionEvents("connEventStats");// Connection events object
 //ConnectionCheck connectionCheck;
-AppWatchdogWrapper watchdog(60000);
-SessionCheck sessionCheck(3600);
+//AppWatchdogWrapper watchdog(60000);
+//SessionCheck sessionCheck(3600);
 BatteryCheck batteryCheck(15.0, 3600);
 
 
@@ -142,7 +146,7 @@ int dailyPersonCount = 0;                           // daily counter
 // These are diagnostic measures that I am playing with
 int alerts = 0;                                     // Alerts are triggered when MaxMinLimit is exceeded or a reset due to errors
 int maxMin = 0;                                     // What is the current maximum count in a minute for this reporting period
-int maxMinLimit;                                    // Counts above this amount will be deemed erroroneus
+byte maxMinLimit;                                    // Counts above this amount will be deemed erroroneus
 
 void setup()                                        // Note: Disconnected Setup()
 {
@@ -206,7 +210,7 @@ void setup()                                        // Note: Disconnected Setup(
   // Load the elements for improving troubleshooting and reliability
   connectionEvents.setup();                                           // For logging connection event data
   //connectionCheck.setup();
-  sessionCheck.setup();
+  //sessionCheck.setup();
   batteryCheck.setup();
 
   // Load FRAM and reset variables to their correct values
@@ -367,6 +371,7 @@ void loop()
     }
     else if (millis() - webhookTimeStamp > webhookWait) {             // If it takes too long - will need to reset
       resetTimeStamp = millis();
+      Particle.publish("spark/device/session/end", "", PRIVATE);      // If the device times out on the Webhook response, it will ensure a new session is started on next connect
       state = ERROR_STATE;                                            // Response timed out
     }
     break;
@@ -375,11 +380,19 @@ void loop()
     if (verboseMode && state != oldState) publishStateTransition();
     if (millis() > resetTimeStamp + resetWait)
     {
-      if (Particle.connected()) Particle.publish("State","ERROR_STATE - Resetting", PRIVATE);            // Reset time expired - time to go
-      delay(2000);
-      FRAMwrite8(FRAM::alertsCountAddr,alerts);                       // Save counts in case of reset
-      if (resetCount <= 3)  System.reset();                           // Today, only way out is reset
+      if (resetCount <= 3) {                                          // First try simple reset
+        if (Particle.connected()) Particle.publish("State","Error State - Reset", PRIVATE);    // Brodcast Reset Action
+        delay(2000);
+        System.reset();                                             
+      } 
+      else if (Time.now() - FRAMread32(FRAM::lastHookResponseAddr) > 7200L) { //It has been more than two hours since a sucessful hook response
+        if (Particle.connected()) Particle.publish("State","Error State - Power Cycle", PRIVATE);  // Broadcast Reset Action
+        delay(2000);
+        digitalWrite(hardResetPin,HIGH);                              // This will cut all power to the Electron AND the carrier board
+      }
       else {                                                          // If we have had 3 resets - time to do something more
+        if (Particle.connected()) Particle.publish("State","Error State - Full Modem Reset", PRIVATE);            // Brodcase Reset Action
+        delay(2000);                                                                     
         FRAMwrite8(FRAM::resetCountAddr,0);                           // Zero the ResetCount
         fullModemReset();                                             // Full Modem reset and reboots
       }
@@ -389,7 +402,7 @@ void loop()
   Particle.process();
   connectionEvents.loop();
   //connectionCheck.loop();
-  sessionCheck.loop();
+  //sessionCheck.loop();
   batteryCheck.loop();
 }
 
@@ -483,6 +496,7 @@ void UbidotsHandler(const char *event, const char *data)              // Looks a
   if ((responseCode == 200) || (responseCode == 201))
   {
     if (Particle.connected()) Particle.publish("State","Response Received", PRIVATE);
+    FRAMwrite32(FRAM::lastHookResponseAddr,Time.now());                     // Record the last successful Webhook Response
     dataInFlight = false;                                             // Data has been received
   }
   else if (Particle.connected()) Particle.publish("Ubidots Hook", dataCopy, PRIVATE);                    // Publish the response code
