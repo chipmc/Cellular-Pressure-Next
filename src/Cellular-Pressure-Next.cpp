@@ -30,6 +30,7 @@
 //v1.10 - Added a syncTime instruction when there is a new day
 //v1.11 - Took our alert increment except in exceeing maxMinLimit
 //v1.12 - Took out App watchdog, session monitoring, added reset session on Webhook timeout and reset if more than 2 hrs on webhook 
+//v1.13 - Added some messaging to the ERROR_STATE
 
 
 
@@ -62,7 +63,7 @@ int setMaxMinLimit(String command);
 bool meterParticlePublish(void);
 void publishStateTransition(void);
 void fullModemReset();
-#line 34 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Pressure-Next/src/Cellular-Pressure-Next.ino"
+#line 35 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Pressure-Next/src/Cellular-Pressure-Next.ino"
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
     versionAddr           = 0x0,                    // Where we store the memory map version number
@@ -82,7 +83,7 @@ namespace FRAM {                                    // Moved to namespace instea
 };
 
 const int versionNumber = 9;                        // Increment this number each time the memory map is changed
-const char releaseNumber[6] = "1.12";               // Displays the release on the menu ****  this is not a production release ****
+const char releaseNumber[6] = "1.14";               // Displays the release on the menu ****  this is not a production release ****
 
 // Included Libraries
 #include "Adafruit_FRAM_I2C.h"                      // Library for FRAM functions
@@ -307,7 +308,7 @@ void setup()                                        // Note: Disconnected Setup(
   // Deterimine when the last counts were taken check when starting test to determine if we reload values or start counts over
   if (currentDailyPeriod != Time.day(unixTime)) {
     resetEverything();                                                // Zero the counts for the new day
-    Particle.syncTime();
+    if (solarPowerMode && !lowPowerMode) setLowPowerMode("1");          // If we are running on solar, we will reset to lowPowerMode at Midnight
   }
   if ((Time.hour() > closeTime || Time.hour() < openTime)) {}         // The park is closed - sleep
   else {                                                              // Park is open let's get ready for the day
@@ -386,7 +387,8 @@ void loop()
 
   case REPORTING_STATE:
     if (verboseMode && state != oldState) publishStateTransition();
-    if (!(0b00010000 & controlRegisterValue)) connectToParticle();
+    if (!(0b00010000 & controlRegisterValue)) connectToParticle();      // New process to get connected
+    if (Time.hour() == 12) Particle.syncTime();                         // Set the clock each day at noon
     takeMeasurements();                                                 // Update Temp, Battery and Signal Strength values
     sendEvent();                                                        // Send data to Ubidots
     state = RESP_WAIT_STATE;                                            // Wait for Response
@@ -411,13 +413,19 @@ void loop()
     if (verboseMode && state != oldState) publishStateTransition();
     if (millis() > resetTimeStamp + resetWait)
     {
-      if (Particle.connected()) Particle.publish("State","ERROR_STATE - Resetting", PRIVATE);            // Reset time expired - time to go
-      delay(2000);
-      if (resetCount <= 3)  System.reset();                           // Today, only way out is reset
+      if (resetCount <= 3) {                                          // First try simple reset
+        if (Particle.connected()) Particle.publish("State","Error State - Reset", PRIVATE);    // Brodcast Reset Action
+        delay(2000);
+        System.reset();                                             
+      } 
       else if (Time.now() - FRAMread32(FRAM::lastHookResponseAddr) > 7200L) { //It has been more than two hours since a sucessful hook response
-           digitalWrite(hardResetPin,HIGH);                                  // This will cut all power to the Electron AND the carrir board
+        if (Particle.connected()) Particle.publish("State","Error State - Power Cycle", PRIVATE);  // Broadcast Reset Action
+        delay(2000);
+        digitalWrite(hardResetPin,HIGH);                              // This will cut all power to the Electron AND the carrier board
       }
       else {                                                          // If we have had 3 resets - time to do something more
+        if (Particle.connected()) Particle.publish("State","Error State - Full Modem Reset", PRIVATE);            // Brodcase Reset Action
+        delay(2000);                                                                     
         FRAMwrite8(FRAM::resetCountAddr,0);                           // Zero the ResetCount
         fullModemReset();                                             // Full Modem reset and reboots
       }
@@ -609,7 +617,7 @@ void connectToParticle() {
   FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);       // Write to the control register
   Particle.connect();
   // wait for *up to* 5 minutes
-  for (int retry = 0; retry < 30 && !waitFor(Particle.connected,10000); retry++) {
+  for (int retry = 0; retry < 300 && !waitFor(Particle.connected,1000); retry++) {
     if(sensorDetect) recordCount(); // service the interrupt every 10 seconds
     Particle.process();
   }
