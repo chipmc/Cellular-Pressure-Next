@@ -29,6 +29,9 @@
 //v1.11 - Took our alert increment except in exceeing maxMinLimit
 //v1.12 - Took out App watchdog, session monitoring, added reset session on Webhook timeout and reset if more than 2 hrs on webhook 
 //v1.13 - Added some messaging to the ERROR_STATE
+//v1.14 - More responsive to counts while connecting, better Synctime and revert to lowPower daily if on Solar
+//v1.15 - Fixed reset do loop if more than 4 resets and more than 2 hours since reporting (or a new install)
+//v1.16 - Added logic for when connections are not successful
 
 
 
@@ -51,7 +54,7 @@ namespace FRAM {                                    // Moved to namespace instea
 };
 
 const int versionNumber = 9;                        // Increment this number each time the memory map is changed
-const char releaseNumber[6] = "1.14";               // Displays the release on the menu ****  this is not a production release ****
+const char releaseNumber[6] = "1.16";               // Displays the release on the menu ****  this is not a production release ****
 
 // Included Libraries
 #include "Adafruit_FRAM_I2C.h"                      // Library for FRAM functions
@@ -93,7 +96,7 @@ const int blueLED =       D7;                       // This LED is on the Electr
 const int userSwitch =    D5;                       // User switch with a pull-up resistor
 // Pin Constants - Sensor
 const int intPin =        B1;                       // Pressure Sensor inerrupt pin
-const int resetPin =      B2;                       // Not currently used - pin that can reset a pressure sensor interrupt
+const int analogIn =      B2;                       // This pin sees the raw output of the pressure sensor
 const int disableModule = B3;                       // Bringining this low turns on the sensor (pull-up on sensor board)
 const int ledPower =      B4;                       // Allows us to control the indicator LED on the sensor board
 
@@ -158,7 +161,7 @@ void setup()                                        // Note: Disconnected Setup(
     to determine which of the three we are in and finish the code
   */
   pinMode(wakeUpPin,INPUT);                         // This pin is active HIGH
-  pinMode(resetPin,INPUT);                          // Not used but don't want it floating
+  pinMode(analogIn,INPUT);                          // Not used but don't want it floating
   pinMode(userSwitch,INPUT);                        // Momentary contact button on board for direct user input
   pinMode(blueLED, OUTPUT);                         // declare the Blue LED Pin as an output
   pinMode(tmp36Shutdwn,OUTPUT);                     // Supports shutting down the TMP-36 to save juice
@@ -227,8 +230,7 @@ void setup()                                        // Note: Disconnected Setup(
     resetCount++;
     FRAMwrite8(FRAM::resetCountAddr,static_cast<uint8_t>(resetCount));// If so, store incremented number - watchdog must have done This
   }
-  if (resetCount >=4) state = ERROR_STATE;                            // If we get to resetCount 4, we are resetting without entering the main loop
-
+  
   // Check and import values from FRAM
   debounce = 100*FRAMread8(FRAM::debounceAddr);
   if (debounce <= 100 || debounce > 2000) debounce = 500;             // We store debounce in dSec so mult by 100 for mSec
@@ -276,7 +278,7 @@ void setup()                                        // Note: Disconnected Setup(
   // Deterimine when the last counts were taken check when starting test to determine if we reload values or start counts over
   if (currentDailyPeriod != Time.day(unixTime)) {
     resetEverything();                                                // Zero the counts for the new day
-    if (solarPowerMode && !lowPowerMode) setLowPowerMode("1");          // If we are running on solar, we will reset to lowPowerMode at Midnight
+    if (solarPowerMode && !lowPowerMode) setLowPowerMode("1");        // If we are running on solar, we will reset to lowPowerMode at Midnight
   }
   if ((Time.hour() > closeTime || Time.hour() < openTime)) {}         // The park is closed - sleep
   else {                                                              // Park is open let's get ready for the day
@@ -355,11 +357,14 @@ void loop()
 
   case REPORTING_STATE:
     if (verboseMode && state != oldState) publishStateTransition();
-    if (!(0b00010000 & controlRegisterValue)) connectToParticle();      // New process to get connected
-    if (Time.hour() == 12) Particle.syncTime();                         // Set the clock each day at noon
-    takeMeasurements();                                                 // Update Temp, Battery and Signal Strength values
-    sendEvent();                                                        // Send data to Ubidots
-    state = RESP_WAIT_STATE;                                            // Wait for Response
+    if (!(0b00010000 & controlRegisterValue)) connectToParticle();        // Only attempt to connect if not already New process to get connected
+    if (Particle.connected()) {
+      if (Time.hour() == 12) Particle.syncTime();                         // Set the clock each day at noon
+      takeMeasurements();                                                 // Update Temp, Battery and Signal Strength values
+      sendEvent();                                                        // Send data to Ubidots
+      state = RESP_WAIT_STATE;                                            // Wait for Response
+    }
+    else state = ERROR_STATE;                                    
     break;
 
   case RESP_WAIT_STATE:
@@ -389,6 +394,7 @@ void loop()
       else if (Time.now() - FRAMread32(FRAM::lastHookResponseAddr) > 7200L) { //It has been more than two hours since a sucessful hook response
         if (Particle.connected()) Particle.publish("State","Error State - Power Cycle", PRIVATE);  // Broadcast Reset Action
         delay(2000);
+        FRAMwrite8(FRAM::resetCountAddr,0);                           // Zero the ResetCount
         digitalWrite(hardResetPin,HIGH);                              // This will cut all power to the Electron AND the carrier board
       }
       else {                                                          // If we have had 3 resets - time to do something more
@@ -578,16 +584,23 @@ void PMICreset() {
  // They are intended to allow for customization and control during installations
  // and to allow for management.
 
-void connectToParticle() {
+bool connectToParticle() {
   Cellular.on();
-  controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);      // Get the control register (general approach)
-  controlRegisterValue = (0b00010000 | controlRegisterValue);       // Turn on connected mode 1 = connected and 0 = disconnected
-  FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);       // Write to the control register
   Particle.connect();
   // wait for *up to* 5 minutes
   for (int retry = 0; retry < 300 && !waitFor(Particle.connected,1000); retry++) {
     if(sensorDetect) recordCount(); // service the interrupt every 10 seconds
     Particle.process();
+  }
+  if (Particle.connected()) {
+    controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);      // Get the control register (general approach)
+    controlRegisterValue = (0b00010000 | controlRegisterValue);       // Turn on connected mode 1 = connected and 0 = disconnected
+    FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);       // Write to the control register
+    return 1;                               // Were able to connect successfully
+  } 
+  else { 
+    return 0;                                                    // Failed to connect
+
   }
 }
 
