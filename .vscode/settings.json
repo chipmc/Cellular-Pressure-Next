@@ -1,6 +1,6 @@
 {
     "C_Cpp.default.configurationProvider": "particle.particle-vscode-core",
-    "particle.targetDevice": "Electron-Dev",
+    "particle.targetDevice": "NC-SouthMtn-ClearCreek",
     "particle.firmwareVersion": "1.0.1",
     "particle.targetPlatform": "electron",
     "cortex-debug.openocdPath": "/Users/chipmc/.particle/toolchains/openocd/0.10.0-particle.1/bin/openocd"

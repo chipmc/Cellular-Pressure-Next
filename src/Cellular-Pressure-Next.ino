@@ -32,6 +32,7 @@
 //v1.14 - More responsive to counts while connecting, better Synctime and revert to lowPower daily if on Solar
 //v1.15 - Fixed reset do loop if more than 4 resets and more than 2 hours since reporting (or a new install)
 //v1.16 - Added logic for when connections are not successful
+//v1.17 - Fix for MaxMinLimit Particle variable
 
 
 
@@ -54,7 +55,7 @@ namespace FRAM {                                    // Moved to namespace instea
 };
 
 const int versionNumber = 9;                        // Increment this number each time the memory map is changed
-const char releaseNumber[6] = "1.16";               // Displays the release on the menu ****  this is not a production release ****
+const char releaseNumber[6] = "1.17";               // Displays the release on the menu ****  this is not a production release ****
 
 // Included Libraries
 #include "Adafruit_FRAM_I2C.h"                      // Library for FRAM functions
@@ -149,7 +150,7 @@ int dailyPersonCount = 0;                           // daily counter
 // These are diagnostic measures that I am playing with
 int alerts = 0;                                     // Alerts are triggered when MaxMinLimit is exceeded or a reset due to errors
 int maxMin = 0;                                     // What is the current maximum count in a minute for this reporting period
-byte maxMinLimit;                                    // Counts above this amount will be deemed erroroneus
+int maxMinLimit;                                    // Counts above this amount will be deemed erroroneus
 
 void setup()                                        // Note: Disconnected Setup()
 {
