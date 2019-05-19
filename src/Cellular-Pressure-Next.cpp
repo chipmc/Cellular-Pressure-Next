@@ -29,7 +29,7 @@
 //v1.09 - Took out connection check as it was causing hourly reboots
 //v1.10 - Added a syncTime instruction when there is a new day
 //v1.11 - Took our alert increment except in exceeing maxMinLimit
-//v1.12 - Took out App watchdog, session monitoring, added reset session on Webhook timeout and reset if more than 2 hrs on webhook 
+//v1.12 - Took out App watchdog, session monitoring, added reset session on Webhook timeout and reset if more than 2 hrs on webhook
 //v1.13 - Added some messaging to the ERROR_STATE
 //v1.14 - More responsive to counts while connecting, better Synctime and revert to lowPower daily if on Solar
 //v1.15 - Fixed reset do loop if more than 4 resets and more than 2 hours since reporting (or a new install)
@@ -87,7 +87,7 @@ namespace FRAM {                                    // Moved to namespace instea
 };
 
 const int versionNumber = 9;                        // Increment this number each time the memory map is changed
-const char releaseNumber[6] = "1.16";               // Displays the release on the menu ****  this is not a production release ****
+const char releaseNumber[6] = "1.17";               // Displays the release on the menu ****  this is not a production release ****
 
 // Included Libraries
 #include "Adafruit_FRAM_I2C.h"                      // Library for FRAM functions
@@ -263,7 +263,7 @@ void setup()                                        // Note: Disconnected Setup(
     resetCount++;
     FRAMwrite8(FRAM::resetCountAddr,static_cast<uint8_t>(resetCount));// If so, store incremented number - watchdog must have done This
   }
-  
+
   // Check and import values from FRAM
   debounce = 100*FRAMread8(FRAM::debounceAddr);
   if (debounce <= 100 || debounce > 2000) debounce = 500;             // We store debounce in dSec so mult by 100 for mSec
@@ -397,7 +397,7 @@ void loop()
       sendEvent();                                                        // Send data to Ubidots
       state = RESP_WAIT_STATE;                                            // Wait for Response
     }
-    else state = ERROR_STATE;                                    
+    else state = ERROR_STATE;
     break;
 
   case RESP_WAIT_STATE:
@@ -422,8 +422,8 @@ void loop()
       if (resetCount <= 3) {                                          // First try simple reset
         if (Particle.connected()) Particle.publish("State","Error State - Reset", PRIVATE);    // Brodcast Reset Action
         delay(2000);
-        System.reset();                                             
-      } 
+        System.reset();
+      }
       else if (Time.now() - FRAMread32(FRAM::lastHookResponseAddr) > 7200L) { //It has been more than two hours since a sucessful hook response
         if (Particle.connected()) Particle.publish("State","Error State - Power Cycle", PRIVATE);  // Broadcast Reset Action
         delay(2000);
@@ -432,7 +432,7 @@ void loop()
       }
       else {                                                          // If we have had 3 resets - time to do something more
         if (Particle.connected()) Particle.publish("State","Error State - Full Modem Reset", PRIVATE);            // Brodcase Reset Action
-        delay(2000);                                                                     
+        delay(2000);
         FRAMwrite8(FRAM::resetCountAddr,0);                           // Zero the ResetCount
         fullModemReset();                                             // Full Modem reset and reboots
       }
@@ -630,10 +630,9 @@ bool connectToParticle() {
     controlRegisterValue = (0b00010000 | controlRegisterValue);       // Turn on connected mode 1 = connected and 0 = disconnected
     FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);       // Write to the control register
     return 1;                               // Were able to connect successfully
-  } 
-  else { 
+  }
+  else {
     return 0;                                                    // Failed to connect
-
   }
 }
 
