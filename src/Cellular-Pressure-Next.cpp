@@ -35,6 +35,7 @@
 //v1.15 - Fixed reset do loop if more than 4 resets and more than 2 hours since reporting (or a new install)
 //v1.16 - Added logic for when connections are not successful
 //v1.17 - Fix for MaxMinLimit Particle variable
+//v1.18 - Semi-Automatic mode vs. manual mode
 
 
 
@@ -67,7 +68,7 @@ int setMaxMinLimit(String command);
 bool meterParticlePublish(void);
 void publishStateTransition(void);
 void fullModemReset();
-#line 39 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Pressure-Next/src/Cellular-Pressure-Next.ino"
+#line 40 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Pressure-Next/src/Cellular-Pressure-Next.ino"
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
     versionAddr           = 0x0,                    // Where we store the memory map version number
@@ -87,7 +88,8 @@ namespace FRAM {                                    // Moved to namespace instea
 };
 
 const int versionNumber = 9;                        // Increment this number each time the memory map is changed
-const char releaseNumber[6] = "1.17";               // Displays the release on the menu ****  this is not a production release ****
+
+const char releaseNumber[6] = "1.18";               // Displays the release on the menu ****  this is not a production release ****
 
 // Included Libraries
 #include "Adafruit_FRAM_I2C.h"                      // Library for FRAM functions
@@ -100,7 +102,7 @@ const char releaseNumber[6] = "1.17";               // Displays the release on t
 #include "BatteryCheck.h"
 
 // Prototypes and System Mode calls
-SYSTEM_MODE(MANUAL);                                // This will enable user code to start executing automatically.
+SYSTEM_MODE(SEMI_AUTOMATIC);                        // This will enable user code to start executing automatically.
 SYSTEM_THREAD(ENABLED);                             // Means my code will not be held up by Particle processes.
 STARTUP(System.enableFeature(FEATURE_RESET_INFO));
 FuelGauge batteryMonitor;                           // Prototype for the fuel gauge (included in Particle core library)
