@@ -1,6 +1,6 @@
 {
   "event": "Send_Counts",
-  "url": "https://things.ubidots.com/api/v1.6/devices/{{PARTICLE_DEVICE_ID}}/?token=6EALvOEabrFiA6XViWY3hxcFMG0yDr",
+  "url": "https://things.ubidots.com/api/v1.6/devices/{{PARTICLE_DEVICE_ID}}/?token= **  Your Token here **",
   "requestType": "POST",
   "mydevices": true,
   "noDefaults": true,

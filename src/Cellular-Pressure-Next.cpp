@@ -36,6 +36,7 @@
 //v1.16 - Added logic for when connections are not successful
 //v1.17 - Fix for MaxMinLimit Particle variable
 //v1.18 - Semi-Automatic mode vs. manual mode
+//v1.19 - Improved disconnectFromParticle()
 
 
 
@@ -52,6 +53,8 @@ void watchdogISR();
 void petWatchdog();
 void PMICreset();
 bool connectToParticle();
+bool disconnectFromParticle();
+bool notConnected();
 int resetFRAM(String command);
 int resetCounts(String command);
 int hardResetNow(String command);
@@ -68,7 +71,7 @@ int setMaxMinLimit(String command);
 bool meterParticlePublish(void);
 void publishStateTransition(void);
 void fullModemReset();
-#line 40 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Pressure-Next/src/Cellular-Pressure-Next.ino"
+#line 41 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Pressure-Next/src/Cellular-Pressure-Next.ino"
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
     versionAddr           = 0x0,                    // Where we store the memory map version number
@@ -89,7 +92,7 @@ namespace FRAM {                                    // Moved to namespace instea
 
 const int versionNumber = 9;                        // Increment this number each time the memory map is changed
 
-const char releaseNumber[6] = "1.18";               // Displays the release on the menu ****  this is not a production release ****
+const char releaseNumber[6] = "1.19";               // Displays the release on the menu ****  this is not a production release ****
 
 // Included Libraries
 #include "Adafruit_FRAM_I2C.h"                      // Library for FRAM functions
@@ -247,8 +250,6 @@ void setup()                                        // Note: Disconnected Setup(
 
   // Load the elements for improving troubleshooting and reliability
   connectionEvents.setup();                                           // For logging connection event data
-  //connectionCheck.setup();
-  //sessionCheck.setup();
   batteryCheck.setup();
 
   // Load FRAM and reset variables to their correct values
@@ -356,11 +357,7 @@ void loop()
       state = REPORTING_STATE;
       break;
     }
-    if (connectionMode) {
-      Particle.disconnect();
-      Cellular.off();
-      delay(1000);
-    }
+    if (connectionMode) disconnectFromParticle();                     // Disconnect cleanly from Particle
     digitalWrite(blueLED,LOW);                                        // Turn off the LED
     digitalWrite(tmp36Shutdwn, LOW);                                  // Turns off the temp sensor
     int wakeInSeconds = constrain(wakeBoundary - Time.now() % wakeBoundary, 1, wakeBoundary);
@@ -371,12 +368,10 @@ void loop()
     if (verboseMode && state != oldState) publishStateTransition();
     if (sensorDetect) break;                                   // Don't nap until we are done with event
     if ((0b00010000 & controlRegisterValue)) {                        // If we are in connected mode
-      Particle.disconnect();                                          // Otherwise Electron will attempt to reconnect on wake
+      disconnectFromParticle();                                       // Disconnect from Particle
       controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);    // Get the control register (general approach)
       controlRegisterValue = (0b11101111 & controlRegisterValue);     // Turn off connected mode 1 = connected and 0 = disconnected
       connectionMode = false;
-      Cellular.off();
-      delay(1000);                                                    // Bummer but only should happen once an hour
       FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);     // Write to the control register
     }
     stayAwake = debounce;                                             // Once we come into this function, we need to reset stayAwake as it changes at the top of the hour                                                 // Increment the wakes per hour count
@@ -443,8 +438,6 @@ void loop()
   }
   Particle.process();
   connectionEvents.loop();
-  //connectionCheck.loop();
-  //sessionCheck.loop();
   batteryCheck.loop();
 }
 
@@ -636,6 +629,19 @@ bool connectToParticle() {
   else {
     return 0;                                                    // Failed to connect
   }
+}
+
+bool disconnectFromParticle()                                     // Ensures we disconnect cleanly from Particle
+{
+  Particle.disconnect();
+  waitFor(notConnected, 15000);                                   // make sure before turning off the cellular modem                              
+  Cellular.off();
+  delay(2000);                                                    // Bummer but only should happen once an hour
+  return true;
+}
+
+bool notConnected() {                                             // Companion function for disconnectFromParticle
+    return !Particle.connected();
 }
 
 int resetFRAM(String command)                                         // Will reset the local counts
