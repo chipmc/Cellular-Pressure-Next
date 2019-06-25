@@ -136,11 +136,12 @@ uint8_t Adafruit_FRAM_I2C::read8 (uint16_t framAddr)
 void Adafruit_FRAM_I2C::getDeviceID(uint16_t *manufacturerID, uint16_t *productID)
 {
   uint8_t a[3] = { 0, 0, 0 };
-  uint8_t results;
+  //uint8_t results;
 
   Wire.beginTransmission(MB85RC_SLAVE_ID >> 1);
   Wire.write(i2c_addr << 1);
-  results = Wire.endTransmission(false);
+  //uint8_t results = Wire.endTransmission(false);
+  Wire.endTransmission(false);
 
   Wire.requestFrom(MB85RC_SLAVE_ID >> 1, 3);
   a[0] = Wire.read();
