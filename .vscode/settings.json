@@ -1,7 +1,7 @@
 {
     "C_Cpp.default.configurationProvider": "particle.particle-vscode-core",
-    "particle.targetDevice": "Wake-GreenHills-Car",
-    "particle.firmwareVersion": "1.1.0",
+    "particle.targetDevice": "Wake-Crabtree-Trail",
+    "particle.firmwareVersion": "1.2.1",
     "particle.targetPlatform": "electron",
-    "cortex-debug.openocdPath": "/Users/chipmc/.particle/toolchains/openocd/0.10.0-particle.1/bin/openocd"
+    "cortex-debug.openocdPath": "${command:particle.getDebuggerOpenocdPath}"
 }

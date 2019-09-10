@@ -37,6 +37,10 @@
 //v1.19 - Improved disconnectFromParticle()
 //v1.20 - Improved meterParticlePublish - fix for note getting connected with user button
 //v1.21 - Added a nightly cleanup function for time, lowPower and verboseMode
+//v1.21b - Fixed an error in meterParticlePublish()
+//v2 - Turn off the LED on the sensor after Setup. Moving to product firmware numbering - integer
+//v3 - Preventing an update while data is being uploaded
+//v4 - Updated to see if the System calls to enable and disable calls are interferring with updates
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -58,14 +62,18 @@ namespace FRAM {                                    // Moved to namespace instea
 
 const int versionNumber = 9;                        // Increment this number each time the memory map is changed
 
-const char releaseNumber[6] = "1.21";               // Displays the release on the menu ****  this is not a production release ****
+const char releaseNumber[6] = "4";                  // Displays the release on the menu ****  this is not a production release ****
 
 // Included Libraries
+#include "Particle.h"                               // Particle's libraries - new for product 
 #include "Adafruit_FRAM_I2C.h"                      // Library for FRAM functions
 #include "FRAM-Library-Extensions.h"                // Extends the FRAM Library
 #include "electrondoc.h"                            // Documents pinout
 #include "ConnectionEvents.h"                       // Stores information on last connection attemt in memory
 #include "BatteryCheck.h"
+
+PRODUCT_ID(4441);
+PRODUCT_VERSION(4);
 
 // Prototypes and System Mode calls
 SYSTEM_MODE(SEMI_AUTOMATIC);                        // This will enable user code to start executing automatically.
@@ -125,7 +133,7 @@ bool lowPowerMode;                                  // Flag for Low Power Mode o
 bool connectionMode;                                // Need to store if we are going to connect or not in the register
 bool solarPowerMode;                                // Changes the PMIC settings
 bool verboseMode;                                   // Enables more active communications for configutation and setup
-char SignalString[64];                     // Used to communicate Wireless RSSI and Description
+char SignalString[64];                              // Used to communicate Wireless RSSI and Description
 const char* radioTech[8] = {"Unknown","None","WiFi","GSM","UMTS","CDMA","LTE","IEEE802154"};
 
 // Time Related Variables
@@ -140,7 +148,7 @@ int stateOfCharge = 0;                              // stores battery charge lev
 // This section is where we will initialize sensor specific variables, libraries and function prototypes
 // Pressure Sensor Variables
 u_int16_t debounce;                                 // This is the numerical value of debounce - in millis()
-char debounceStr[8] = "NA";                         // String to make debounce more readalbe on the mobile app
+char debounceStr[8] = "NA";                         // String to make debounce more readable on the mobile app
 volatile bool sensorDetect = false;                 // This is the flag that an interrupt is triggered
 unsigned long currentEvent = 0;                     // Time for the current sensor event
 int hourlyPersonCount = 0;                          // hourly counter
@@ -169,7 +177,7 @@ void setup()                                        // Note: Disconnected Setup(
   digitalWrite(tmp36Shutdwn, HIGH);                 // Turns on the temp sensor
   pinMode(donePin,OUTPUT);                          // Allows us to pet the watchdog
   pinMode(hardResetPin,OUTPUT);                     // For a hard reset active HIGH
-  // Pressure Module Pin Setup
+  // Pressure / PIR Module Pin Setup
   pinMode(intPin,INPUT_PULLDOWN);                   // pressure sensor interrupt
   pinMode(disableModule,OUTPUT);                    // Turns on the module when pulled low
   pinResetFast(disableModule);                      // Turn on the module - send high to switch off board
@@ -244,7 +252,6 @@ void setup()                                        // Note: Disconnected Setup(
   maxMinLimit = FRAMread8(FRAM::maxMinLimitAddr);                     // This is the maximum number of counts in a minute
   if (maxMinLimit < 2 || maxMinLimit > 30) maxMinLimit = 10;          // If value has never been intialized - reasonable value
 
-
   controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);        // Read the Control Register for system modes
   lowPowerMode    = (0b00000001 & controlRegisterValue);              // Bitwise AND to set the lowPowerMode flag from control Register
   verboseMode     = (0b00001000 & controlRegisterValue);              // verboseMode
@@ -280,7 +287,7 @@ void setup()                                        // Note: Disconnected Setup(
     resetEverything();                                                // Zero the counts for the new day
     if (solarPowerMode && !lowPowerMode) setLowPowerMode("1");        // If we are running on solar, we will reset to lowPowerMode at Midnight
   }
-  if ((Time.hour() > closeTime || Time.hour() < openTime)) {}         // The park is closed - sleep
+  if ((currentHourlyPeriod > closeTime || currentHourlyPeriod < openTime)) {}         // The park is closed - sleep
   else {                                                              // Park is open let's get ready for the day
     attachInterrupt(intPin, sensorISR, RISING);                       // Pressure Sensor interrupt from low to high
     if (connectionMode) connectToParticle();                          // Only going to connect if we are in connectionMode
@@ -288,7 +295,12 @@ void setup()                                        // Note: Disconnected Setup(
     stayAwake = stayAwakeLong;                                        // Keeps Electron awake after reboot - helps with recovery
   }
 
-  if (state == INITIALIZATION_STATE) state = IDLE_STATE;              // IDLE unless otherwise from above code
+  pinResetFast(ledPower);                                             // Turns off the LED on the sensor board
+
+  if (state == INITIALIZATION_STATE) {
+    state = IDLE_STATE;                                               // IDLE unless otherwise from above code
+    System.enableUpdates();                                           // Allowing updates as we are heading off to the idle state
+  }
 }
 
 void loop()
@@ -305,7 +317,7 @@ void loop()
       maxMin = 0;
       alerts = 0;
       FRAMwrite8(FRAM::alertsCountAddr,0);
-      if (currentHourlyPeriod == 23) resetEverything();                // We have reported for the previous day - reset for the next.
+      if (currentHourlyPeriod == 23) resetEverything();                // We have reported for the previous day - reset for the next - only needed if no sleep
     }
     if (lowPowerMode && (millis() - stayAwakeTimeStamp) > stayAwake) state = NAPPING_STATE;  // When in low power mode, we can nap between taps
     if (Time.hour() != currentHourlyPeriod) state = REPORTING_STATE;  // We want to report on the hour but not after bedtime
@@ -316,7 +328,6 @@ void loop()
     if (verboseMode && state != oldState) publishStateTransition();
     detachInterrupt(intPin);                                          // Done sensing for the day
     pinSetFast(disableModule);                                        // Turn off the pressure module for the hour
-    pinResetFast(ledPower);                                           // Turn off the LED on the module
     if (hourlyPersonCount) {                                          // If this number is not zero then we need to send this last count
       state = REPORTING_STATE;
       break;
@@ -346,7 +357,7 @@ void loop()
        awokeFromNap=true;                                             // Since millis() stops when sleeping - need this to debounce
        stayAwakeTimeStamp = millis();
     }
-    state = IDLE_STATE;                                               // Back to the IDLE_STATE after a nap
+    state = IDLE_STATE;                                               // Back to the IDLE_STATE after a nap - not enabling updates here as napping is typicallly disconnected
     } break;
 
   case REPORTING_STATE:
@@ -366,6 +377,7 @@ void loop()
     if (!dataInFlight)                                                // Response received back to IDLE state
     {
       state = IDLE_STATE;
+      System.enableUpdates();                                         // Allowing updates as we are heading off to the idle state
       stayAwake = stayAwakeLong;                                      // Keeps Electron awake after reboot - helps with recovery
       stayAwakeTimeStamp = millis();
     }
@@ -400,7 +412,6 @@ void loop()
     }
     break;
   }
-  Particle.process();
   connectionEvents.loop();
   batteryCheck.loop();
 }
@@ -440,16 +451,16 @@ void recordCount() // This is where we check to see if an interrupt is set when 
         Particle.publish("Alert", "Exceeded Maxmin limit", PRIVATE);
       }
       alerts++;
-      FRAMwrite8(FRAM::alertsCountAddr,alerts);                       // Save counts in case of reset
+      FRAMwrite8(FRAM::alertsCountAddr,alerts);                        // Save counts in case of reset
     }
 
     hourlyPersonCount++;                                                // Increment the PersonCount
     FRAMwrite16(FRAM::currentHourlyCountAddr, hourlyPersonCount);       // Load Hourly Count to memory
     dailyPersonCount++;                                                 // Increment the PersonCount
     FRAMwrite16(FRAM::currentDailyCountAddr, dailyPersonCount);         // Load Daily Count to memory
-    FRAMwrite32(FRAM::currentCountsTimeAddr, Time.now());             // Write to FRAM - this is so we know when the last counts were saved
+    FRAMwrite32(FRAM::currentCountsTimeAddr, Time.now());              // Write to FRAM - this is so we know when the last counts were saved
     if (verboseMode && Particle.connected()) {
-      char data[256];                                                   // Store the date in this character array - not global
+      char data[256];                                                    // Store the date in this character array - not global
       snprintf(data, sizeof(data), "Count, hourly: %i, daily: %i",hourlyPersonCount,dailyPersonCount);
       meterParticlePublish();
       Particle.publish("Count",data, PRIVATE);                                   // Helpful for monitoring and calibration
@@ -461,7 +472,7 @@ void recordCount() // This is where we check to see if an interrupt is set when 
   }
 
   if (!digitalRead(userSwitch)) {                     // A low value means someone is pushing this button - will trigger a send to Ubidots and take out of low power mode
-    connectToParticle();                              // Get connected to Particle                   
+    connectToParticle();                              // Get connected to Particle
     meterParticlePublish();
     if (Particle.connected()) Particle.publish("Mode","Normal Operations", PRIVATE);
     controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);      // Load the control register
@@ -583,6 +594,7 @@ void PMICreset() {
  // and to allow for management.
 
 bool connectToParticle() {
+  System.disableUpdates();                                             // Disabling updates here so we can complete any data transfers in process - will enable when we get to IDLE
   Cellular.on();
   Particle.connect();
   // wait for *up to* 5 minutes
@@ -604,7 +616,7 @@ bool connectToParticle() {
 bool disconnectFromParticle()                                     // Ensures we disconnect cleanly from Particle
 {
   Particle.disconnect();
-  waitFor(notConnected, 15000);                                   // make sure before turning off the cellular modem                              
+  waitFor(notConnected, 15000);                                   // make sure before turning off the cellular modem
   Cellular.off();
   delay(2000);                                                    // Bummer but only should happen once an hour
   return true;
@@ -836,8 +848,8 @@ bool meterParticlePublish(void)
 {
   static unsigned long lastPublish=0;                                 // Initialize and store value here
   if(millis() - lastPublish >= publishFrequency) {
-    return 1;
     lastPublish = millis();
+    return 1;
   }
   else return 0;
 }
@@ -878,7 +890,7 @@ void dailyCleanup() {                                                 // Functio
   controlRegisterValue = (0b11110111 & controlRegisterValue);         // Turn off verboseMode
 
   Particle.syncTime();                                                // Set the clock each day
-  waitFor(Particle.syncTimeDone,30000);                               // Wait for up to 30 seconds for the yncTime to complete
+  waitFor(Particle.syncTimeDone,30000);                               // Wait for up to 30 seconds for the SyncTime to complete
 
   if (solarPowerMode || stateOfCharge <= 70) {                        // If the battery is being discharged
     controlRegisterValue = (0b00000001 | controlRegisterValue);       // If so, put the device in lowPowerMode
