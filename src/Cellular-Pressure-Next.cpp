@@ -45,6 +45,9 @@
 //v1.21b - Fixed an error in meterParticlePublish()
 //v2 - Turn off the LED on the sensor after Setup. Moving to product firmware numbering - integer
 //v3 - Preventing an update while data is being uploaded
+//v4 - Updated to see if the System calls to enable and disable calls are interferring with updates
+//v5 - Reduced the time that we are not available for update
+//v6 - Fixed Publish rate limit issues
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -66,10 +69,10 @@ namespace FRAM {                                    // Moved to namespace instea
 
 const int versionNumber = 9;                        // Increment this number each time the memory map is changed
 
-const char releaseNumber[6] = "2";                  // Displays the release on the menu ****  this is not a production release ****
+const char releaseNumber[6] = "5";                  // Displays the release on the menu ****  this is not a production release ****
 
 // Included Libraries
-#include "Particle.h"
+#include "Particle.h"                               // Particle's libraries - new for product 
 void setup();
 void loop();
 void recordCount();
@@ -102,7 +105,7 @@ bool meterParticlePublish(void);
 void publishStateTransition(void);
 void fullModemReset();
 void dailyCleanup();
-#line 68 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Pressure-Next/src/Cellular-Pressure-Next.ino"
+#line 71 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Pressure-Next/src/Cellular-Pressure-Next.ino"
 #include "Adafruit_FRAM_I2C.h"                      // Library for FRAM functions
 #include "FRAM-Library-Extensions.h"                // Extends the FRAM Library
 #include "electrondoc.h"                            // Documents pinout
@@ -110,7 +113,7 @@ void dailyCleanup();
 #include "BatteryCheck.h"
 
 PRODUCT_ID(4441);
-PRODUCT_VERSION(2);
+PRODUCT_VERSION(5);
 
 // Prototypes and System Mode calls
 SYSTEM_MODE(SEMI_AUTOMATIC);                        // This will enable user code to start executing automatically.
@@ -152,7 +155,6 @@ const int wakeBoundary = 1*3600 + 0*60 + 0;         // 1 hour 0 minutes 0 second
 const unsigned long stayAwakeLong = 90000;          // In lowPowerMode, how long to stay awake every hour
 const unsigned long webhookWait = 45000;            // How long will we wair for a WebHook response
 const unsigned long resetWait = 30000;              // How long will we wait in ERROR_STATE until reset
-const int publishFrequency = 1000;                  // We can only publish once a second
 unsigned long stayAwakeTimeStamp = 0;               // Timestamps for our timing variables..
 unsigned long stayAwake;                            // Stores the time we need to wait before napping
 unsigned long webhookTimeStamp = 0;                 // Webhooks...
@@ -214,7 +216,7 @@ void setup()                                        // Note: Disconnected Setup(
   digitalWrite(tmp36Shutdwn, HIGH);                 // Turns on the temp sensor
   pinMode(donePin,OUTPUT);                          // Allows us to pet the watchdog
   pinMode(hardResetPin,OUTPUT);                     // For a hard reset active HIGH
-  // Pressure Module Pin Setup
+  // Pressure / PIR Module Pin Setup
   pinMode(intPin,INPUT_PULLDOWN);                   // pressure sensor interrupt
   pinMode(disableModule,OUTPUT);                    // Turns on the module when pulled low
   pinResetFast(disableModule);                      // Turn on the module - send high to switch off board
@@ -289,7 +291,6 @@ void setup()                                        // Note: Disconnected Setup(
   maxMinLimit = FRAMread8(FRAM::maxMinLimitAddr);                     // This is the maximum number of counts in a minute
   if (maxMinLimit < 2 || maxMinLimit > 30) maxMinLimit = 10;          // If value has never been intialized - reasonable value
 
-
   controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);        // Read the Control Register for system modes
   lowPowerMode    = (0b00000001 & controlRegisterValue);              // Bitwise AND to set the lowPowerMode flag from control Register
   verboseMode     = (0b00001000 & controlRegisterValue);              // verboseMode
@@ -335,10 +336,7 @@ void setup()                                        // Note: Disconnected Setup(
 
   pinResetFast(ledPower);                                             // Turns off the LED on the sensor board
 
-  if (state == INITIALIZATION_STATE) {
-    state = IDLE_STATE;                                               // IDLE unless otherwise from above code
-    //System.enableUpdates();                                           // Allowing updates as we are heading off to the idle state
-  }
+  if (state == INITIALIZATION_STATE) state = IDLE_STATE;              // IDLE unless otherwise from above code
 }
 
 void loop()
@@ -401,6 +399,7 @@ void loop()
   case REPORTING_STATE:
     if (verboseMode && state != oldState) publishStateTransition();
     if (!(0b00010000 & controlRegisterValue)) connectToParticle();    // Only attempt to connect if not already New process to get connected
+    //System.disableUpdates();                                          // Don't want an update while we are reporting
     if (Particle.connected()) {
       if (Time.hour() == closeTime) dailyCleanup();                   // Once a day, clean house
       takeMeasurements();                                             // Update Temp, Battery and Signal Strength values
@@ -421,6 +420,7 @@ void loop()
     }
     else if (millis() - webhookTimeStamp > webhookWait) {             // If it takes too long - will need to reset
       resetTimeStamp = millis();
+      waitUntil(meterParticlePublish);
       Particle.publish("spark/device/session/end", "", PRIVATE);      // If the device times out on the Webhook response, it will ensure a new session is started on next connect
       state = ERROR_STATE;                                            // Response timed out
     }
@@ -431,17 +431,20 @@ void loop()
     if (millis() > resetTimeStamp + resetWait)
     {
       if (resetCount <= 3) {                                          // First try simple reset
+        waitUntil(meterParticlePublish);
         if (Particle.connected()) Particle.publish("State","Error State - Reset", PRIVATE);    // Brodcast Reset Action
         delay(2000);
         System.reset();
       }
       else if (Time.now() - FRAMread32(FRAM::lastHookResponseAddr) > 7200L) { //It has been more than two hours since a sucessful hook response
+        waitUntil(meterParticlePublish);
         if (Particle.connected()) Particle.publish("State","Error State - Power Cycle", PRIVATE);  // Broadcast Reset Action
         delay(2000);
         FRAMwrite8(FRAM::resetCountAddr,0);                           // Zero the ResetCount
         digitalWrite(hardResetPin,HIGH);                              // This will cut all power to the Electron AND the carrier board
       }
       else {                                                          // If we have had 3 resets - time to do something more
+        waitUntil(meterParticlePublish);
         if (Particle.connected()) Particle.publish("State","Error State - Full Modem Reset", PRIVATE);            // Brodcase Reset Action
         delay(2000);
         FRAMwrite8(FRAM::resetCountAddr,0);                           // Zero the ResetCount
@@ -485,7 +488,7 @@ void recordCount() // This is where we check to see if an interrupt is set when 
       dailyPersonCount -= currentMinuteCount;
       currentMinuteCount = 0;
       if (verboseMode && Particle.connected()) {
-        meterParticlePublish();
+        waitUntil(meterParticlePublish);
         Particle.publish("Alert", "Exceeded Maxmin limit", PRIVATE);
       }
       alerts++;
@@ -500,18 +503,18 @@ void recordCount() // This is where we check to see if an interrupt is set when 
     if (verboseMode && Particle.connected()) {
       char data[256];                                                    // Store the date in this character array - not global
       snprintf(data, sizeof(data), "Count, hourly: %i, daily: %i",hourlyPersonCount,dailyPersonCount);
-      meterParticlePublish();
+      waitUntil(meterParticlePublish);
       Particle.publish("Count",data, PRIVATE);                                   // Helpful for monitoring and calibration
     }
   }
   else if(verboseMode && Particle.connected()) {
-    meterParticlePublish();
+    waitUntil(meterParticlePublish);
     Particle.publish("Event","Debounced", PRIVATE);
   }
 
   if (!digitalRead(userSwitch)) {                     // A low value means someone is pushing this button - will trigger a send to Ubidots and take out of low power mode
     connectToParticle();                              // Get connected to Particle
-    meterParticlePublish();
+    waitUntil(meterParticlePublish);
     if (Particle.connected()) Particle.publish("Mode","Normal Operations", PRIVATE);
     controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);      // Load the control register
     controlRegisterValue = (0b1111110 & controlRegisterValue);        // Will set the lowPowerMode bit to zero
@@ -543,12 +546,14 @@ void UbidotsHandler(const char *event, const char *data)              // Looks a
   char dataCopy[strlen(data)+1];                                      // data needs to be copied since if (Particle.connected()) Particle.publish() will clear it
   strncpy(dataCopy, data, sizeof(dataCopy));                          // Copy - overflow safe
   if (!strlen(dataCopy)) {                                            // First check to see if there is any data
+    waitUntil(meterParticlePublish);
     if (Particle.connected()) Particle.publish("Ubidots Hook", "No Data", PRIVATE);
     return;
   }
   int responseCode = atoi(dataCopy);                                  // Response is only a single number thanks to Template
   if ((responseCode == 200) || (responseCode == 201))
   {
+    waitUntil(meterParticlePublish);
     if (Particle.connected()) Particle.publish("State","Response Received", PRIVATE);
     FRAMwrite32(FRAM::lastHookResponseAddr,Time.now());                     // Record the last successful Webhook Response
     dataInFlight = false;                                             // Data has been received
@@ -632,7 +637,6 @@ void PMICreset() {
  // and to allow for management.
 
 bool connectToParticle() {
-  //System.disableUpdates();                                             // Disabling updates here so we can complete any data transfers in process - will enable when we get to IDLE
   Cellular.on();
   Particle.connect();
   // wait for *up to* 5 minutes
@@ -748,6 +752,7 @@ int setSolarMode(String command) // Function to force sending data in current ho
     controlRegisterValue = (0b00000100 | controlRegisterValue);          // Turn on solarPowerMode
     FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);               // Write it to the register
     PMICreset();                                               // Change the power management Settings
+    waitUntil(meterParticlePublish);
     if (Particle.connected()) Particle.publish("Mode","Set Solar Powered Mode", PRIVATE);
     return 1;
   }
@@ -758,6 +763,7 @@ int setSolarMode(String command) // Function to force sending data in current ho
     controlRegisterValue = (0b11111011 & controlRegisterValue);           // Turn off solarPowerMode
     FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);                // Write it to the register
     PMICreset();                                                // Change the power management settings
+    waitUntil(meterParticlePublish);
     if (Particle.connected()) Particle.publish("Mode","Cleared Solar Powered Mode", PRIVATE);
     return 1;
   }
@@ -772,6 +778,7 @@ int setVerboseMode(String command) // Function to force sending data in current 
     controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);
     controlRegisterValue = (0b00001000 | controlRegisterValue);                    // Turn on verboseMode
     FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);                        // Write it to the register
+    waitUntil(meterParticlePublish);
     if (Particle.connected()) Particle.publish("Mode","Set Verbose Mode", PRIVATE);
     return 1;
   }
@@ -781,6 +788,7 @@ int setVerboseMode(String command) // Function to force sending data in current 
     controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);
     controlRegisterValue = (0b11110111 & controlRegisterValue);                    // Turn off verboseMode
     FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);                        // Write it to the register
+    waitUntil(meterParticlePublish);
     if (Particle.connected()) Particle.publish("Mode","Cleared Verbose Mode", PRIVATE);
     return 1;
   }
@@ -797,8 +805,9 @@ int setTimeZone(String command)
   Time.zone((float)tempTimeZoneOffset);
   FRAMwrite8(FRAM::timeZoneAddr,tempTimeZoneOffset);                             // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Time zone offset %i",tempTimeZoneOffset);
+  waitUntil(meterParticlePublish);
   if (Particle.connected()) Particle.publish("Time",data, PRIVATE);
-  delay(1000);
+  waitUntil(meterParticlePublish);
   if (Particle.connected()) Particle.publish("Time",Time.timeStr(t), PRIVATE);
   return 1;
 }
@@ -812,6 +821,7 @@ int setOpenTime(String command)
   openTime = tempTime;
   FRAMwrite8(FRAM::openTimeAddr,openTime);                             // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Open time set to %i",openTime);
+  waitUntil(meterParticlePublish);
   if (Particle.connected()) Particle.publish("Time",data, PRIVATE);
   return 1;
 }
@@ -825,6 +835,7 @@ int setCloseTime(String command)
   closeTime = tempTime;
   FRAMwrite8(FRAM::closeTimeAddr,closeTime);                             // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Closing time set to %i",closeTime);
+  waitUntil(meterParticlePublish);
   if (Particle.connected()) Particle.publish("Time",data, PRIVATE);
   return 1;
 }
@@ -857,15 +868,15 @@ int setLowPowerMode(String command)                                   // This is
       Particle.publish("Mode","Normal Operations", PRIVATE);
     }
     if (!(0b00010000 & controlRegisterValue)) {
-      controlRegisterValue = (0b00010000 | controlRegisterValue);    // Turn on connected mode 1 = connected and 0 = disconnected
+      controlRegisterValue = (0b00010000 | controlRegisterValue);       // Turn on connected mode 1 = connected and 0 = disconnected
       Particle.connect();
-      waitFor(Particle.connected,60000);                             // Give us 60 seconds to connect
+      waitFor(Particle.connected,60000);                                // Give us 60 seconds to connect
       Particle.process();
     }
-    controlRegisterValue = (0b11111110 & controlRegisterValue);      // If so, flip the lowPowerMode bit
+    controlRegisterValue = (0b11111110 & controlRegisterValue);         // If so, flip the lowPowerMode bit
     lowPowerMode = false;
   }
-  FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);        // Write to the control register
+  FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);           // Write to the control register
   return 1;
 }
 
@@ -874,18 +885,19 @@ int setMaxMinLimit(String command)
   char * pEND;
   char data[256];
   int tempMaxMinLimit = strtol(command,&pEND,10);                       // Looks for the first integer and interprets it
-  if ((tempMaxMinLimit < 2) || (tempMaxMinLimit > 30)) return 0;   // Make sure it falls in a valid range or send a "fail" result
+  if ((tempMaxMinLimit < 2) || (tempMaxMinLimit > 30)) return 0;        // Make sure it falls in a valid range or send a "fail" result
   maxMinLimit = tempMaxMinLimit;
-  FRAMwrite8(FRAM::maxMinLimitAddr,maxMinLimit);                             // Store the new value in FRAMwrite8
+  FRAMwrite8(FRAM::maxMinLimitAddr,maxMinLimit);                        // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "MaxMin limit set to %i",maxMinLimit);
+  waitUntil(meterParticlePublish);
   if (Particle.connected()) Particle.publish("MaxMin",data,PRIVATE);
   return 1;
 }
 
 bool meterParticlePublish(void)
 {
-  static unsigned long lastPublish=0;                                 // Initialize and store value here
-  if(millis() - lastPublish >= publishFrequency) {
+  static unsigned long lastPublish=0;                                   // Initialize and store value here
+  if(millis() - lastPublish >= 1000) {                                  // Particle rate limits at 1 publish per second
     lastPublish = millis();
     return 1;
   }
