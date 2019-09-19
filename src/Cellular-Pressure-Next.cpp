@@ -48,6 +48,7 @@
 //v4 - Updated to see if the System calls to enable and disable calls are interferring with updates
 //v5 - Reduced the time that we are not available for update
 //v6 - Fixed Publish rate limit issues
+//v7 - Variable pin definitions based on device type - Electron or Boron
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -68,8 +69,6 @@ namespace FRAM {                                    // Moved to namespace instea
 };
 
 const int versionNumber = 9;                        // Increment this number each time the memory map is changed
-
-const char releaseNumber[6] = "5";                  // Displays the release on the menu ****  this is not a production release ****
 
 // Included Libraries
 #include "Particle.h"                               // Particle's libraries - new for product 
@@ -105,15 +104,20 @@ bool meterParticlePublish(void);
 void publishStateTransition(void);
 void fullModemReset();
 void dailyCleanup();
-#line 71 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Pressure-Next/src/Cellular-Pressure-Next.ino"
+#line 70 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Pressure-Next/src/Cellular-Pressure-Next.ino"
 #include "Adafruit_FRAM_I2C.h"                      // Library for FRAM functions
 #include "FRAM-Library-Extensions.h"                // Extends the FRAM Library
 #include "electrondoc.h"                            // Documents pinout
 #include "ConnectionEvents.h"                       // Stores information on last connection attemt in memory
 #include "BatteryCheck.h"
 
-PRODUCT_ID(4441);
-PRODUCT_VERSION(5);
+//PRODUCT_ID(4441);                                   // Connected Counter Header
+//PRODUCT_VERSION(5);
+const char releaseNumber[6] = "7";                  // Displays the release on the menu ****  this is not a production release ****
+
+// PRODUCT_ID(10089);                                  // Santa Cruz Counter
+// PRODUCT_VERSION(2);
+// const char releaseNumber[6] = "7";                  // Displays the release on the menu ****  this is not a production release ****
 
 // Prototypes and System Mode calls
 SYSTEM_MODE(SEMI_AUTOMATIC);                        // This will enable user code to start executing automatically.
@@ -122,9 +126,6 @@ STARTUP(System.enableFeature(FEATURE_RESET_INFO));
 FuelGauge batteryMonitor;                           // Prototype for the fuel gauge (included in Particle core library)
 PMIC power;                                         //Initalize the PMIC class so you can call the Power Management functions below.
 ConnectionEvents connectionEvents("connEventStats");// Connection events object
-//ConnectionCheck connectionCheck;
-//AppWatchdogWrapper watchdog(60000);
-//SessionCheck sessionCheck(3600);
 BatteryCheck batteryCheck(15.0, 3600);
 
 
@@ -135,6 +136,7 @@ State state = INITIALIZATION_STATE;
 State oldState = INITIALIZATION_STATE;
 
 
+#if (PLATFORM_ID == PLATFORM_ELECTRON_PRODUCTION)
 // Pin Constants - Carrier Board
 const int tmp36Pin =      A0;                       // Simple Analog temperature sensor
 const int wakeUpPin =     A7;                       // This is the Particle Electron WKP pin
@@ -148,7 +150,21 @@ const int intPin =        B1;                       // Pressure Sensor inerrupt 
 const int analogIn =      B2;                       // This pin sees the raw output of the pressure sensor
 const int disableModule = B3;                       // Bringining this low turns on the sensor (pull-up on sensor board)
 const int ledPower =      B4;                       // Allows us to control the indicator LED on the sensor board
-
+#else
+// Pin Constants - Carrier Board
+const int tmp36Pin =      A4;                       // Simple Analog temperature sensor
+const int wakeUpPin =     D8;                       // This is the Particle Electron WKP pin
+const int tmp36Shutdwn =  A3;                       // This is a dummy pin until I figure out what to do
+const int hardResetPin =  D4;                       // Power Cycles the Electron and the Carrier Board
+const int donePin =       D5;                       // Pin the Electron uses to "pet" the watchdog
+const int blueLED =       D7;                       // This LED is on the Electron itself
+const int userSwitch =    D4;                       // User switch with a pull-up resistor
+// Pin Constants - Sensor
+const int intPin =        MOSI;                       // Pressure Sensor inerrupt pin
+const int analogIn =      SCK;                       // This pin sees the raw output of the pressure sensor
+const int disableModule = SS;                       // Bringining this low turns on the sensor (pull-up on sensor board)
+const int ledPower =      MISO;                       // Allows us to control the indicator LED on the sensor board
+#endif
 
 // Timing Variables
 const int wakeBoundary = 1*3600 + 0*60 + 0;         // 1 hour 0 minutes 0 seconds
