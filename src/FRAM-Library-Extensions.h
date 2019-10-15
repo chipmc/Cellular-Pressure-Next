@@ -84,10 +84,10 @@ void ResetFRAM()  // This will reset the FRAM - set the version and preserve del
         if (i==(24576)) if (Particle.connected()) Particle.publish("Event", "Fram Reset 3/4 done", PRIVATE);
         if (i==32767) if (Particle.connected()) Particle.publish("Event", "Fram Reset done", PRIVATE);
     }
-    FRAMwrite8(FRAM::controlRegisterAddr,tempControlReg);   // Preserce the control register values
-    FRAMwrite8(FRAM::versionAddr,versionNumber);  // Reset version to match #define value for sketch
-    FRAMwrite8(FRAM::openTimeAddr,0);                               // These set the defaults if the FRAM is erased
-    FRAMwrite8(FRAM::closeTimeAddr,23);                             // This will ensure the device does not sleep
-    FRAMwrite8(FRAM::debounceAddr,10);                               // Sets a default debounce of 1 Sec
+    FRAMwrite8(FRAM::controlRegisterAddr,tempControlReg);                   // Preserce the control register values
+    FRAMwrite8(FRAM::versionAddr,FRAMversionNumber);                        // Reset version to match #define value for sketch
+    FRAMwrite8(FRAM::openTimeAddr,0);                                       // These set the defaults if the FRAM is erased
+    FRAMwrite8(FRAM::closeTimeAddr,23);                                     // This will ensure the device does not sleep
+    FRAMwrite8(FRAM::debounceAddr,10);                                      // Sets a default debounce of 1 Sec
 
 }

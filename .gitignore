@@ -31,10 +31,13 @@
 *.out
 *.app
 
-VSCode Stuff
+#VSCode Stuff
 *.bin
 *.elf
 *.hex
 *.lst
 *.bin.*
 *.map
+
+#Directories
+target/
