@@ -339,7 +339,7 @@ void loop()
     if (Time.hour() == 2 && Time.isValid()) isDSTusa() ? Time.beginDST() : Time.endDST();    // Each day, at 2am we will check to see if we need a DST offset
     if (lowPowerMode && (millis() - stayAwakeTimeStamp) > stayAwake) state = NAPPING_STATE;  // When in low power mode, we can nap between taps
     if (Time.hour() != currentHourlyPeriod) state = REPORTING_STATE;  // We want to report on the hour but not after bedtime
-    if ((Time.hour() > closeTime || Time.hour() < openTime)) state = SLEEPING_STATE;   // The park is closed - sleep
+    if ((Time.hour() > closeTime || Time.hour() < openTime)) state = SLEEPING_STATE;   // The park is closed - sleep - Note thie means that close time = 21 will not sleep till 22
     break;
 
   case SLEEPING_STATE: {                                              // This state is triggered once the park closes and runs until it opens
