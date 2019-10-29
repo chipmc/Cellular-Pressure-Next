@@ -117,8 +117,8 @@ bool isDSTusa();
 #include "BatteryCheck.h"
 
 PRODUCT_ID(4441);                                   // Connected Counter Header
-PRODUCT_VERSION(8);
-const char releaseNumber[4] = "8";                  // Displays the release on the menu ****  this is not a production release ****
+PRODUCT_VERSION(9);
+const char releaseNumber[4] = "9";                  // Displays the release on the menu ****  this is not a production release ****
 
 // PRODUCT_ID(10089);                                  // Santa Cruz Counter
 // PRODUCT_VERSION(2);
@@ -379,7 +379,7 @@ void loop()
     if (Time.hour() == 2 && Time.isValid()) isDSTusa() ? Time.beginDST() : Time.endDST();    // Each day, at 2am we will check to see if we need a DST offset
     if (lowPowerMode && (millis() - stayAwakeTimeStamp) > stayAwake) state = NAPPING_STATE;  // When in low power mode, we can nap between taps
     if (Time.hour() != currentHourlyPeriod) state = REPORTING_STATE;  // We want to report on the hour but not after bedtime
-    if ((Time.hour() > closeTime || Time.hour() < openTime)) state = SLEEPING_STATE;   // The park is closed - sleep
+    if ((Time.hour() > closeTime || Time.hour() < openTime)) state = SLEEPING_STATE;   // The park is closed - sleep - Note thie means that close time = 21 will not sleep till 22
     break;
 
   case SLEEPING_STATE: {                                              // This state is triggered once the park closes and runs until it opens
@@ -801,6 +801,7 @@ int setVerboseMode(String command) // Function to force sending more information
     FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);                        // Write it to the register
     waitUntil(meterParticlePublish);
     if (Particle.connected()) Particle.publish("Mode","Set Verbose Mode", PRIVATE);
+    oldState = state;                                                               // Avoid a bogus publish once set
     return 1;
   }
   else if (command == "0")
@@ -872,10 +873,10 @@ int setCloseTime(String command)
 {
   char * pEND;
   char data[256];
-  int tempTime = strtol(command,&pEND,10);                       // Looks for the first integer and interprets it
-  if ((tempTime < 0) || (tempTime > 23)) return 0;   // Make sure it falls in a valid range or send a "fail" result
+  int tempTime = strtol(command,&pEND,10);                            // Looks for the first integer and interprets it
+  if ((tempTime < 0) || (tempTime > 23)) return 0;                    // Make sure it falls in a valid range or send a "fail" result
   closeTime = tempTime;
-  FRAMwrite8(FRAM::closeTimeAddr,closeTime);                             // Store the new value in FRAMwrite8
+  FRAMwrite8(FRAM::closeTimeAddr,closeTime);                          // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Closing time set to %i",closeTime);
   waitUntil(meterParticlePublish);
   if (Particle.connected()) Particle.publish("Time",data, PRIVATE);

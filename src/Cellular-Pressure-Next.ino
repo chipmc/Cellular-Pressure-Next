@@ -77,8 +77,8 @@ const int FRAMversionNumber = 10;                       // Increment this number
 #include "BatteryCheck.h"
 
 PRODUCT_ID(4441);                                   // Connected Counter Header
-PRODUCT_VERSION(8);
-const char releaseNumber[4] = "8";                  // Displays the release on the menu ****  this is not a production release ****
+PRODUCT_VERSION(9);
+const char releaseNumber[4] = "9";                  // Displays the release on the menu ****  this is not a production release ****
 
 // PRODUCT_ID(10089);                                  // Santa Cruz Counter
 // PRODUCT_VERSION(2);
