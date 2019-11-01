@@ -117,8 +117,8 @@ bool isDSTusa();
 #include "BatteryCheck.h"
 
 PRODUCT_ID(4441);                                   // Connected Counter Header
-PRODUCT_VERSION(9);
-const char releaseNumber[4] = "9";                  // Displays the release on the menu ****  this is not a production release ****
+PRODUCT_VERSION(10);
+const char releaseNumber[4] = "10";                  // Displays the release on the menu ****  this is not a production release ****
 
 // PRODUCT_ID(10089);                                  // Santa Cruz Counter
 // PRODUCT_VERSION(2);
