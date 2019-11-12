@@ -46,6 +46,9 @@
 //v7 - Variable pin definitions based on device type - Electron or Boron
 //v8 - Moved to being Electron specific.  Took out code to delete counts over maxMin
 //v9 - Added logic to accomodate Daylight Savings Time for US installations - Code to smooth mempory map 9-10 can be removed later
+//v10 - Same but did not force an update to deviceOS@1.4.2
+//v11 - Adding in temp checks for charging, changing Webhook to include battery status - fixed DST calculations for US
+
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -75,14 +78,21 @@ const int FRAMversionNumber = 10;                       // Increment this number
 #include "electrondoc.h"                            // Documents pinout
 #include "ConnectionEvents.h"                       // Stores information on last connection attemt in memory
 #include "BatteryCheck.h"
+#include "PowerCheck.h"
+
 
 PRODUCT_ID(4441);                                   // Connected Counter Header
-PRODUCT_VERSION(10);
-const char releaseNumber[4] = "10";                  // Displays the release on the menu ****  this is not a production release ****
+PRODUCT_VERSION(11);
+const char releaseNumber[4] = "11";                  // Displays the release on the menu ****  this is not a production release ****
 
 // PRODUCT_ID(10089);                                  // Santa Cruz Counter
-// PRODUCT_VERSION(2);
-// const char releaseNumber[6] = "7";                  // Displays the release on the menu ****  this is not a production release ****
+// PRODUCT_VERSION(3);
+// const char releaseNumber[6] = "3";                  // Displays the release on the menu ****  this is not a production release ****
+
+// PRODUCT_ID(10343);                                  // Xyst Counters
+// PRODUCT_VERSION(1);
+// const char releaseNumber[6] = "1";                  // Displays the release on the menu ****  this is not a production release ****
+ 
 
 // Prototypes and System Mode calls
 SYSTEM_MODE(SEMI_AUTOMATIC);                        // This will enable user code to start executing automatically.
@@ -90,6 +100,7 @@ SYSTEM_THREAD(ENABLED);                             // Means my code will not be
 STARTUP(System.enableFeature(FEATURE_RESET_INFO));
 FuelGauge batteryMonitor;                           // Prototype for the fuel gauge (included in Particle core library)
 PMIC power;                                         //Initalize the PMIC class so you can call the Power Management functions below.
+PowerCheck powerCheck;                              // instantiates the PowerCheck class to help us provide context with charge level reporting
 ConnectionEvents connectionEvents("connEventStats");// Connection events object
 BatteryCheck batteryCheck(15.0, 3600);
 
@@ -147,6 +158,7 @@ char currentOffsetStr[10];                          // What is our offset from U
 
 // Battery monitoring
 int stateOfCharge = 0;                              // stores battery charge level value
+char powerContext[24];                              // One word that describes whether the device is getting power, charging, discharging or too cold to charge
 
 // This section is where we will initialize sensor specific variables, libraries and function prototypes
 // Pressure Sensor Variables
@@ -162,6 +174,7 @@ int dailyEventCount = 0;                           // daily counter
 int alerts = 0;                                     // Alerts are triggered when MaxMinLimit is exceeded or a reset due to errors
 int maxMin = 0;                                     // What is the current maximum count in a minute for this reporting period
 int maxMinLimit;                                    // Counts above this amount will be deemed erroroneus
+
 
 void setup()                                        // Note: Disconnected Setup()
 {
@@ -193,19 +206,16 @@ void setup()                                        // Note: Disconnected Setup(
   petWatchdog();                                    // Pet the watchdog - not necessary in a power on event but just in case
   attachInterrupt(wakeUpPin, watchdogISR, RISING);  // The watchdog timer will signal us and we have to respond
 
-  char responseTopic[125];
-  String deviceID = System.deviceID();              // Multiple Electrons share the same hook - keeps things straight
-  deviceID.toCharArray(responseTopic,125);          // Puts the deviceID into the response topic array
-  Particle.subscribe(responseTopic, UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
+  Particle.subscribe(System.deviceID() + "/hook-response/Ubidots-Counter-Hook-v1/", UbidotsHandler, MY_DEVICES);
 
-  Particle.variable("HourlyCount", hourlyEventCount);                // Define my Particle variables
-  Particle.variable("DailyCount", dailyEventCount);                  // Note: Don't have to be connected for any of this!!!
+  Particle.variable("HourlyCount", hourlyEventCount);                   // Define my Particle variables
+  Particle.variable("DailyCount", dailyEventCount);                     // Note: Don't have to be connected for any of this!!!
   Particle.variable("Signal", SignalString);
   Particle.variable("ResetCount", resetCount);
   Particle.variable("Temperature",temperatureF);
   Particle.variable("Release",releaseNumber);
   Particle.variable("stateOfChg", stateOfCharge);
-  Particle.variable("lowPowerMode",lowPowerMode);
+  Particle.variable("PowerContext",powerContext);
   Particle.variable("OpenTime",openTime);
   Particle.variable("CloseTime",closeTime);
   Particle.variable("Debounce",debounceStr);
@@ -213,7 +223,7 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.variable("Alerts",alerts);
   Particle.variable("TimeOffset",currentOffsetStr);
 
-  Particle.function("resetFRAM", resetFRAM);                          // These are the functions exposed to the mobile app and console
+  Particle.function("resetFRAM", resetFRAM);                            // These are the functions exposed to the mobile app and console
   Particle.function("resetCounts",resetCounts);
   Particle.function("HardReset",hardResetNow);
   Particle.function("SendNow",sendNow);
@@ -228,23 +238,24 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.function("Set-MaxMin-Limit",setMaxMinLimit);
 
   // Load the elements for improving troubleshooting and reliability
-  connectionEvents.setup();                                           // For logging connection event data
+  connectionEvents.setup();                                             // For logging connection event data
   batteryCheck.setup();
+  powerCheck.setup();
 
   // Load FRAM and reset variables to their correct values
-  if (!fram.begin()) state = ERROR_STATE;                             // You can stick the new i2c addr in here, e.g. begin(0x51);
-  else if (FRAMread8(FRAM::versionAddr) == 9) {                       // One time upgrade from 9 to 10
-    Time.setDSTOffset(1);                                             // Set a default if out of bounds
-    FRAMwrite8(FRAM::DSTOffsetValueAddr,1);                           // Write new offset value to FRAM
-    FRAMwrite8(FRAM::timeZoneAddr,-5);                                // OK, since the DSTOffset is initialized, so is the Timezone
+  if (!fram.begin()) state = ERROR_STATE;                               // You can stick the new i2c addr in here, e.g. begin(0x51);
+  else if (FRAMread8(FRAM::versionAddr) == 9) {                         // One time upgrade from 9 to 10
+    Time.setDSTOffset(1);                                               // Set a default if out of bounds
+    FRAMwrite8(FRAM::DSTOffsetValueAddr,1);                             // Write new offset value to FRAM
+    FRAMwrite8(FRAM::timeZoneAddr,-5);                                  // OK, since the DSTOffset is initialized, so is the Timezone
   }
-  else if (FRAMread8(FRAM::versionAddr) != FRAMversionNumber) {           // Check to see if the memory map in the sketch matches the data on the chip
-    ResetFRAM();                                                      // Reset the FRAM to correct the issue
+  else if (FRAMread8(FRAM::versionAddr) != FRAMversionNumber) {         // Check to see if the memory map in the sketch matches the data on the chip
+    ResetFRAM();                                                        // Reset the FRAM to correct the issue
     if (FRAMread8(FRAM::versionAddr) != FRAMversionNumber)state = ERROR_STATE; // Resetting did not fix the issue
   }
 
-  alerts = FRAMread8(FRAM::alertsCountAddr);                          // Load the alerts count
-  resetCount = FRAMread8(FRAM::resetCountAddr);                       // Retrive system recount data from FRAM
+  alerts = FRAMread8(FRAM::alertsCountAddr);                            // Load the alerts count
+  resetCount = FRAMread8(FRAM::resetCountAddr);                         // Retrive system recount data from FRAM
   if (System.resetReason() == RESET_REASON_PIN_RESET || System.resetReason() == RESET_REASON_USER)  // Check to see if we are starting from a pin reset or a reset in the sketch
   {
     resetCount++;
@@ -253,54 +264,56 @@ void setup()                                        // Note: Disconnected Setup(
 
   // Check and import values from FRAM
   debounce = 100*FRAMread8(FRAM::debounceAddr);
-  if (debounce <= 100 || debounce > 2000) debounce = 500;             // We store debounce in dSec so mult by 100 for mSec
+  if (debounce <= 100 || debounce > 2000) debounce = 500;               // We store debounce in dSec so mult by 100 for mSec
   snprintf(debounceStr,sizeof(debounceStr),"%2.1f sec",(debounce/1000.0));
   openTime = FRAMread8(FRAM::openTimeAddr);
-  if (openTime < 0 || openTime > 22) openTime = 0;                    // Open and close in 24hr format
+  if (openTime < 0 || openTime > 22) openTime = 0;                      // Open and close in 24hr format
   closeTime = FRAMread8(FRAM::closeTimeAddr);
   if (closeTime < 1 || closeTime > 23) closeTime = 23;
   int8_t tempFRAMvalue = FRAMread8(FRAM::timeZoneAddr);
-  if (tempFRAMvalue >= 12 || tempFRAMvalue <= -12)  Time.zone(-5);    // Default is EST in case proper value not in FRAM
-  else Time.zone((float)tempFRAMvalue);                               // Load Timezone from FRAM
-  int8_t tempDSTOffset = FRAMread8(FRAM::DSTOffsetValueAddr);         // Load the DST offset value
+  if (tempFRAMvalue >= 12 || tempFRAMvalue <= -12)  Time.zone(-5);      // Default is EST in case proper value not in FRAM
+  else Time.zone((float)tempFRAMvalue);                                 // Load Timezone from FRAM
+  int8_t tempDSTOffset = FRAMread8(FRAM::DSTOffsetValueAddr);           // Load the DST offset value
   if (tempDSTOffset < 0 || tempDSTOffset > 2) {
-    Time.setDSTOffset(1);                                             // Set a default if out of bounds
-    FRAMwrite8(FRAM::DSTOffsetValueAddr,1);                           // Write new offset value to FRAM
+    Time.setDSTOffset(1);                                               // Set a default if out of bounds
+    FRAMwrite8(FRAM::DSTOffsetValueAddr,1);                             // Write new offset value to FRAM
   } 
-  else Time.setDSTOffset(tempDSTOffset);                              // Set the value from FRAM if in limits     
-  if (Time.isValid()) isDSTusa() ? Time.beginDST() : Time.endDST();   // Perform the DST calculation here 
-  maxMinLimit = FRAMread8(FRAM::maxMinLimitAddr);                     // This is the maximum number of counts in a minute
-  if (maxMinLimit < 2 || maxMinLimit > 30) maxMinLimit = 10;          // If value has never been intialized - reasonable value
+  else Time.setDSTOffset(tempDSTOffset);                                // Set the value from FRAM if in limits     
+  if (Time.isValid()) isDSTusa() ? Time.beginDST() : Time.endDST();     // Perform the DST calculation here 
+  maxMinLimit = FRAMread8(FRAM::maxMinLimitAddr);                       // This is the maximum number of counts in a minute
+  if (maxMinLimit < 2 || maxMinLimit > 30) maxMinLimit = 10;            // If value has never been intialized - reasonable value
 
-  controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);        // Read the Control Register for system modes
-  lowPowerMode    = (0b00000001 & controlRegisterValue);              // Bitwise AND to set the lowPowerMode flag from control Register
-  verboseMode     = (0b00001000 & controlRegisterValue);              // verboseMode
-  solarPowerMode  = (0b00000100 & controlRegisterValue);              // solarPowerMode
-  connectionMode  = (0b00010000 & controlRegisterValue);              // connected mode 1 = connected and 0 = disconnected
+  controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);          // Read the Control Register for system modes
+  lowPowerMode    = (0b00000001 & controlRegisterValue);                // Bitwise AND to set the lowPowerMode flag from control Register
+  verboseMode     = (0b00001000 & controlRegisterValue);                // verboseMode
+  solarPowerMode  = (0b00000100 & controlRegisterValue);                // solarPowerMode
+  connectionMode  = (0b00010000 & controlRegisterValue);                // connected mode 1 = connected and 0 = disconnected
 
-  PMICreset();                                                        // Executes commands that set up the PMIC for Solar charging
+  PMICreset();                                                          // Executes commands that set up the PMIC for Solar charging
 
-  currentHourlyPeriod = Time.hour();                                  // Sets the hour period for when the count starts (see #defines)
-  currentDailyPeriod = Time.day();                                    // What day is it?
+  currentHourlyPeriod = Time.hour();                                    // Sets the hour period for when the count starts (see #defines)
+  currentDailyPeriod = Time.day();                                      // What day is it?
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);
 
-  time_t unixTime = FRAMread32(FRAM::currentCountsTimeAddr);          // Need to reload last recorded event - current periods set from this event
-  dailyEventCount = FRAMread16(FRAM::currentDailyCountAddr);         // Load Daily Count from memory
-  hourlyEventCount = FRAMread16(FRAM::currentHourlyCountAddr);       // Load Hourly Count from memory
+  time_t unixTime = FRAMread32(FRAM::currentCountsTimeAddr);            // Need to reload last recorded event - current periods set from this event
+  dailyEventCount = FRAMread16(FRAM::currentDailyCountAddr);            // Load Daily Count from memory
+  hourlyEventCount = FRAMread16(FRAM::currentHourlyCountAddr);          // Load Hourly Count from memory
 
-  if (!digitalRead(userSwitch)) {                                     // Rescue mode to locally take lowPowerMode so you can connect to device
-    lowPowerMode = false;                                             // Press the user switch while resetting the device
-    connectionMode = true;                                            // Set the stage for the devic to get connected
-    controlRegisterValue = (0b11111110 & controlRegisterValue);       // Turn off Low power mode
-    controlRegisterValue = (0b00010000 | controlRegisterValue);       // Turn on the connectionMode
-    FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);       // Write it to the register
-    if ((Time.hour() > closeTime || Time.hour() < openTime))  {       // Device may also be sleeping due to time or TimeZone setting
-      openTime = 0;                                                   // Only change these values if it is an issue
-      FRAMwrite8(FRAM::openTimeAddr,0);                               // Reset open and close time values to ensure device is awake
+  if (!digitalRead(userSwitch)) {                                       // Rescue mode to locally take lowPowerMode so you can connect to device
+    lowPowerMode = false;                                               // Press the user switch while resetting the device
+    connectionMode = true;                                              // Set the stage for the devic to get connected
+    controlRegisterValue = (0b11111110 & controlRegisterValue);         // Turn off Low power mode
+    controlRegisterValue = (0b00010000 | controlRegisterValue);         // Turn on the connectionMode
+    FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);         // Write it to the register
+    if ((Time.hour() > closeTime || Time.hour() < openTime))  {         // Device may also be sleeping due to time or TimeZone setting
+      openTime = 0;                                                     // Only change these values if it is an issue
+      FRAMwrite8(FRAM::openTimeAddr,0);                                 // Reset open and close time values to ensure device is awake
       closeTime = 23;
       FRAMwrite8(FRAM::closeTimeAddr,23);
     }
   }
+
+  takeMeasurements();                                                 // Important as we might make decisions based on temp or battery level
 
   // Here is where the code diverges based on why we are running Setup()
   // Deterimine when the last counts were taken check when starting test to determine if we reload values or start counts over
@@ -312,7 +325,6 @@ void setup()                                        // Note: Disconnected Setup(
   else {                                                              // Park is open let's get ready for the day
     attachInterrupt(intPin, sensorISR, RISING);                       // Pressure Sensor interrupt from low to high
     if (connectionMode) connectToParticle();                          // Only going to connect if we are in connectionMode
-    takeMeasurements();                                               // Populates values so you can read them before the hour
     stayAwake = stayAwakeLong;                                        // Keeps Electron awake after reboot - helps with recovery
   }
 
@@ -508,8 +520,8 @@ void recordCount() // This is where we check to see if an interrupt is set when 
 void sendEvent()
 {
   char data[256];                                                     // Store the date in this character array - not global
-  snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i,\"battery\":%i, \"temp\":%i, \"resets\":%i, \"alerts\":%i, \"maxmin\":%i}",hourlyEventCount, dailyEventCount, stateOfCharge, temperatureF, resetCount, alerts, maxMin);
-  Particle.publish("Ubidots-Car-Hook", data, PRIVATE);
+  snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i, \"battery\":%i, \"key1\":\"%s\", \"temp\":%i, \"resets\":%i, \"alerts\":%i, \"maxmin\":%i}",hourlyEventCount, dailyEventCount, stateOfCharge, powerContext, temperatureF, resetCount, alerts, maxMin);
+  Particle.publish("Ubidots-Counter-Hook-v1", data, PRIVATE);
   webhookTimeStamp = millis();
   currentHourlyPeriod = Time.hour();                                  // Change the time period
   if(currentHourlyPeriod == 23) hourlyEventCount++;                  // Ensures we don't have a zero here at midnigtt
@@ -541,8 +553,29 @@ void UbidotsHandler(const char *event, const char *data)              // Looks a
 void takeMeasurements()
 {
   if (Cellular.ready()) getSignalStrength();                          // Test signal strength if the cellular modem is on and ready
-  getTemperature();                                                   // Get Temperature at startup as well
   stateOfCharge = int(batteryMonitor.getSoC());                       // Percentage of full charge
+
+  getTemperature();                                                   // Load the current temp
+
+  if (temperatureF <= 32 || temperatureF >= 113) {                      // Need to add temp charging controls - 
+    snprintf(powerContext, sizeof(powerContext), "Chg Disabled Temp");
+    power.disableCharging();                                          // Disable Charging if temp is too low or too high
+    waitUntil(meterParticlePublish);
+    if (Particle.connected()) Particle.publish("Alert", "Charging disabled Temperature",PRIVATE);
+    return;                                                           // Return to avoid the enableCharging command at the end of the IF statement
+  }
+  else if (powerCheck.getIsCharging()) {
+    snprintf(powerContext, sizeof(powerContext), "Charging");
+  }
+  else if (powerCheck.getHasPower()) {
+    snprintf(powerContext, sizeof(powerContext), "DC-In Powered");
+  }
+  else if (powerCheck.getHasBattery()) {
+    snprintf(powerContext, sizeof(powerContext), "Battery Discharging");
+  }
+  else snprintf(powerContext, sizeof(powerContext), "Undetermined");
+
+  power.enableCharging();                                               // We are good to charge 
 }
 
 
@@ -562,29 +595,27 @@ void getSignalStrength()
   snprintf(SignalString,sizeof(SignalString), "%s S:%2.0f%%, Q:%2.0f%% ", radioTech[rat], strengthPercentage, qualityPercentage);
 }
 
-int getTemperature()
-{
+int getTemperature() {
   int reading = analogRead(tmp36Pin);                                 //getting the voltage reading from the temperature sensor
   float voltage = reading * 3.3;                                      // converting that reading to voltage, for 3.3v arduino use 3.3
   voltage /= 4096.0;                                                  // Electron is different than the Arduino where there are only 1024 steps
   int temperatureC = int(((voltage - 0.5) * 100));                    //converting from 10 mv per degree with 500 mV offset to degrees ((voltage - 500mV) times 100) - 5 degree calibration
+
   temperatureF = int((temperatureC * 9.0 / 5.0) + 32.0);              // now convert to Fahrenheit
+
   return temperatureF;
 }
 
 // Here are the various hardware and timer interrupt service routines
-void sensorISR()
-{
+void sensorISR() {
   sensorDetect = true;                              // sets the sensor flag for the main loop
 }
 
-void watchdogISR()
-{
+void watchdogISR() {
   watchdogFlag = true;
 }
 
-void petWatchdog()
-{
+void petWatchdog() {
   digitalWriteFast(donePin, HIGH);                                        // Pet the watchdog
   digitalWriteFast(donePin, LOW);
   watchdogFlag = false;
@@ -621,33 +652,32 @@ bool connectToParticle() {
     Particle.process();
   }
   if (Particle.connected()) {
-    controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);      // Get the control register (general approach)
-    controlRegisterValue = (0b00010000 | controlRegisterValue);       // Turn on connected mode 1 = connected and 0 = disconnected
-    FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);       // Write to the control register
-    return 1;                               // Were able to connect successfully
+    controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);        // Get the control register (general approach)
+    controlRegisterValue = (0b00010000 | controlRegisterValue);         // Turn on connected mode 1 = connected and 0 = disconnected
+    FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);         // Write to the control register
+    return 1;                                                           // Were able to connect successfully
   }
   else {
-    return 0;                                                    // Failed to connect
+    return 0;                                                           // Failed to connect
   }
 }
 
-bool disconnectFromParticle()                                     // Ensures we disconnect cleanly from Particle
-{
+bool disconnectFromParticle() {                                         // Ensures we disconnect cleanly from Particle
   Particle.disconnect();
   for (int retry = 0; retry < 15 && !waitFor(notConnected, 1000); retry++) {  // make sure before turning off the cellular modem
     if(sensorDetect) recordCount(); // service the interrupt every second
     Particle.process();
   }
   Cellular.off();
-  delay(2000);                                                    // Bummer but only should happen once an hour
+  delay(2000);                                                          // Bummer but only should happen once an hour
   return true;
 }
 
-bool notConnected() {                                             // Companion function for disconnectFromParticle
+bool notConnected() {                                                   // Companion function for disconnectFromParticle
   return !Particle.connected();
 }
 
-int resetFRAM(String command)                                         // Will reset the local counts
+int resetFRAM(String command)                                           // Will reset the local counts
 {
   if (command == "1")
   {
@@ -657,55 +687,52 @@ int resetFRAM(String command)                                         // Will re
   else return 0;
 }
 
-int resetCounts(String command)                                       // Resets the current hourly and daily counts
-{
-  if (command == "1")
-  {
-    FRAMwrite16(FRAM::currentDailyCountAddr, 0);                      // Reset Daily Count in memory
-    FRAMwrite16(FRAM::currentHourlyCountAddr, 0);                     // Reset Hourly Count in memory
-    FRAMwrite8(FRAM::resetCountAddr,0);                               // If so, store incremented number - watchdog must have done This
+int resetCounts(String command) {                                       // Resets the current hourly and daily counts
+
+  if (command == "1") {
+    FRAMwrite16(FRAM::currentDailyCountAddr, 0);                        // Reset Daily Count in memory
+    FRAMwrite16(FRAM::currentHourlyCountAddr, 0);                       // Reset Hourly Count in memory
+    FRAMwrite8(FRAM::resetCountAddr,0);                                 // If so, store incremented number - watchdog must have done This
     FRAMwrite8(FRAM::alertsCountAddr,0);
     alerts = 0;
     resetCount = 0;
-    hourlyEventCount = 0;                                            // Reset count variables
+    hourlyEventCount = 0;                                               // Reset count variables
     dailyEventCount = 0;
-    hourlyEventCountSent = 0;                                        // In the off-chance there is data in flight
+    hourlyEventCountSent = 0;                                           // In the off-chance there is data in flight
     dataInFlight = false;
     return 1;
   }
   else return 0;
 }
 
-int hardResetNow(String command)                                      // Will perform a hard reset on the Electron
-{
+int hardResetNow(String command)   {                                    // Will perform a hard reset on the Electron
   if (command == "1")
   {
     Particle.publish("Reset","Hard Reset in 2 seconds",PRIVATE);
     delay(2000);
-    digitalWrite(hardResetPin,HIGH);                                  // This will cut all power to the Electron AND the carrir board
-    return 1;                                                         // Unfortunately, this will never be sent
+    digitalWrite(hardResetPin,HIGH);                                    // This will cut all power to the Electron AND the carrir board
+    return 1;                                                           // Unfortunately, this will never be sent
   }
   else return 0;
 }
 
-int setDebounce(String command)                                       // This is the amount of time in seconds we will wait before starting a new session
-{
+int setDebounce(String command)   {                                     // This is the amount of time in seconds we will wait before starting a new session
   char * pEND;
-  float inputDebounce = strtof(command,&pEND);                        // Looks for the first float and interprets it
-  if ((inputDebounce < 0.0) | (inputDebounce > 5.0)) return 0;        // Make sure it falls in a valid range or send a "fail" result
-  debounce = int(inputDebounce*1000);                                 // debounce is how long we must space events to prevent overcounting
-  int debounceFRAM = constrain(int(inputDebounce*10),1,255);          // Store as a byte in FRAM = 1.6 seconds becomes 16 dSec
-  FRAMwrite8(FRAM::debounceAddr,static_cast<uint8_t>(debounceFRAM));        // Convert to Int16 and store
+  float inputDebounce = strtof(command,&pEND);                          // Looks for the first float and interprets it
+  if ((inputDebounce < 0.0) | (inputDebounce > 5.0)) return 0;          // Make sure it falls in a valid range or send a "fail" result
+  debounce = int(inputDebounce*1000);                                   // debounce is how long we must space events to prevent overcounting
+  int debounceFRAM = constrain(int(inputDebounce*10),1,255);            // Store as a byte in FRAM = 1.6 seconds becomes 16 dSec
+  FRAMwrite8(FRAM::debounceAddr,static_cast<uint8_t>(debounceFRAM));    // Convert to Int16 and store
   snprintf(debounceStr,sizeof(debounceStr),"%2.1f sec",inputDebounce);
-  if (verboseMode && Particle.connected()) {                                                  // Publish result if feeling verbose
+  if (verboseMode && Particle.connected()) {                            // Publish result if feeling verbose
     waitUntil(meterParticlePublish);
     Particle.publish("Debounce",debounceStr, PRIVATE);
   }
-  return 1;                                                           // Returns 1 to let the user know if was reset
+  return 1;                                                             // Returns 1 to let the user know if was reset
 }
 
-int sendNow(String command) // Function to force sending data in current hour
-{
+int sendNow(String command) {                                           // Function to force sending data in current hour
+
   if (command == "1")
   {
     state = REPORTING_STATE;
@@ -714,20 +741,19 @@ int sendNow(String command) // Function to force sending data in current hour
   else return 0;
 }
 
-void resetEverything() {                                            // The device is waking up in a new day or is a new install
-  FRAMwrite16(FRAM::currentDailyCountAddr, 0);                      // Reset the counts in FRAM as well
+void resetEverything() {                                                // The device is waking up in a new day or is a new install
+  FRAMwrite16(FRAM::currentDailyCountAddr, 0);                          // Reset the counts in FRAM as well
   FRAMwrite16(FRAM::currentHourlyCountAddr, 0);
-  FRAMwrite32(FRAM::currentCountsTimeAddr,Time.now());              // Set the time context to the new day
+  FRAMwrite32(FRAM::currentCountsTimeAddr,Time.now());                  // Set the time context to the new day
   FRAMwrite8(FRAM::resetCountAddr,0);
   FRAMwrite8(FRAM::alertsCountAddr,0);
   FRAMwrite8(FRAM::alertsCountAddr,0);
-  hourlyEventCount = dailyEventCount = resetCount = alerts = 0;   // Reset everything for the day
+  hourlyEventCount = dailyEventCount = resetCount = alerts = 0;         // Reset everything for the day
 }
 
-int setSolarMode(String command) // Function to force sending data in current hour
-{
-  if (command == "1")
-  {
+int setSolarMode(String command) {                                      // Function to force sending data in current hour
+
+  if (command == "1") {
     solarPowerMode = true;
     controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);
     controlRegisterValue = (0b00000100 | controlRegisterValue);          // Turn on solarPowerMode
@@ -737,8 +763,7 @@ int setSolarMode(String command) // Function to force sending data in current ho
     if (Particle.connected()) Particle.publish("Mode","Set Solar Powered Mode", PRIVATE);
     return 1;
   }
-  else if (command == "0")
-  {
+  else if (command == "0") {
     solarPowerMode = false;
     controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);
     controlRegisterValue = (0b11111011 & controlRegisterValue);           // Turn off solarPowerMode
@@ -753,23 +778,21 @@ int setSolarMode(String command) // Function to force sending data in current ho
 
 int setVerboseMode(String command) // Function to force sending more information on the state of the device
 {
-  if (command == "1")
-  {
+  if (command == "1") {
     verboseMode = true;
     controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);
-    controlRegisterValue = (0b00001000 | controlRegisterValue);                    // Turn on verboseMode
-    FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);                        // Write it to the register
+    controlRegisterValue = (0b00001000 | controlRegisterValue);         // Turn on verboseMode
+    FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);         // Write it to the register
     waitUntil(meterParticlePublish);
     if (Particle.connected()) Particle.publish("Mode","Set Verbose Mode", PRIVATE);
-    oldState = state;                                                               // Avoid a bogus publish once set
+    oldState = state;                                                   // Avoid a bogus publish once set
     return 1;
   }
-  else if (command == "0")
-  {
+  else if (command == "0") {
     verboseMode = false;
     controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);
-    controlRegisterValue = (0b11110111 & controlRegisterValue);                    // Turn off verboseMode
-    FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);                        // Write it to the register
+    controlRegisterValue = (0b11110111 & controlRegisterValue);         // Turn off verboseMode
+    FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);         // Write it to the register
     waitUntil(meterParticlePublish);
     if (Particle.connected()) Particle.publish("Mode","Cleared Verbose Mode", PRIVATE);
     return 1;
@@ -777,18 +800,17 @@ int setVerboseMode(String command) // Function to force sending more information
   else return 0;
 }
 
-int setTimeZone(String command)
-{
+int setTimeZone(String command) {                                       // Set the Base Time Zone vs GMT - not Daylight savings time
   char * pEND;
   char data[256];
   time_t t = Time.now();
-  int8_t tempTimeZoneOffset = strtol(command,&pEND,10);                       // Looks for the first integer and interprets it
-  if ((tempTimeZoneOffset < -12) | (tempTimeZoneOffset > 12)) return 0;   // Make sure it falls in a valid range or send a "fail" result
+  int8_t tempTimeZoneOffset = strtol(command,&pEND,10);                 // Looks for the first integer and interprets it
+  if ((tempTimeZoneOffset < -12) | (tempTimeZoneOffset > 12)) return 0; // Make sure it falls in a valid range or send a "fail" result
   Time.zone((float)tempTimeZoneOffset);
-  FRAMwrite8(FRAM::timeZoneAddr,tempTimeZoneOffset);                             // Store the new value in FRAMwrite8
+  FRAMwrite8(FRAM::timeZoneAddr,tempTimeZoneOffset);                    // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Time zone offset %i",tempTimeZoneOffset);
   waitUntil(meterParticlePublish);
-  if (Time.isValid()) isDSTusa() ? Time.beginDST() : Time.endDST();   // Perform the DST calculation here 
+  if (Time.isValid()) isDSTusa() ? Time.beginDST() : Time.endDST();     // Perform the DST calculation here 
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);
   if (Particle.connected()) Particle.publish("Time",data, PRIVATE);
   waitUntil(meterParticlePublish);
@@ -796,18 +818,17 @@ int setTimeZone(String command)
   return 1;
 }
 
-int setDSTOffset(String command)
-{
+int setDSTOffset(String command) {                                      // This is the number of hours that will be added for Daylight Savings Time 0 (off) - 2 
   char * pEND;
   char data[256];
   time_t t = Time.now();
-  int8_t tempDSTOffset = strtol(command,&pEND,10);                    // Looks for the first integer and interprets it
-  if ((tempDSTOffset < 0) | (tempDSTOffset > 2)) return 0;            // Make sure it falls in a valid range or send a "fail" result
-  Time.setDSTOffset((float)tempDSTOffset);                            // Set the DST Offset
-  FRAMwrite8(FRAM::DSTOffsetValueAddr,tempDSTOffset);                 // Store the new value in FRAMwrite8
+  int8_t tempDSTOffset = strtol(command,&pEND,10);                      // Looks for the first integer and interprets it
+  if ((tempDSTOffset < 0) | (tempDSTOffset > 2)) return 0;              // Make sure it falls in a valid range or send a "fail" result
+  Time.setDSTOffset((float)tempDSTOffset);                              // Set the DST Offset
+  FRAMwrite8(FRAM::DSTOffsetValueAddr,tempDSTOffset);                   // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "DST offset %i",tempDSTOffset);
   waitUntil(meterParticlePublish);
-  if (Time.isValid()) isDSTusa() ? Time.beginDST() : Time.endDST();   // Perform the DST calculation here 
+  if (Time.isValid()) isDSTusa() ? Time.beginDST() : Time.endDST();     // Perform the DST calculation here 
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);
   if (Particle.connected()) Particle.publish("Time",data, PRIVATE);
   waitUntil(meterParticlePublish);
@@ -815,28 +836,26 @@ int setDSTOffset(String command)
   return 1;
 }
 
-int setOpenTime(String command)
-{
+int setOpenTime(String command) {                                       // Set the park opening time in local 
   char * pEND;
   char data[256];
-  int tempTime = strtol(command,&pEND,10);                            // Looks for the first integer and interprets it
-  if ((tempTime < 0) || (tempTime > 23)) return 0;                    // Make sure it falls in a valid range or send a "fail" result
+  int tempTime = strtol(command,&pEND,10);                              // Looks for the first integer and interprets it
+  if ((tempTime < 0) || (tempTime > 23)) return 0;                      // Make sure it falls in a valid range or send a "fail" result
   openTime = tempTime;
-  FRAMwrite8(FRAM::openTimeAddr,openTime);                            // Store the new value in FRAMwrite8
+  FRAMwrite8(FRAM::openTimeAddr,openTime);                              // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Open time set to %i",openTime);
   waitUntil(meterParticlePublish);
   if (Particle.connected()) Particle.publish("Time",data, PRIVATE);
   return 1;
 }
 
-int setCloseTime(String command)
-{
+int setCloseTime(String command) {                                      // Set the close time in local - device will sleep between close and open
   char * pEND;
   char data[256];
-  int tempTime = strtol(command,&pEND,10);                            // Looks for the first integer and interprets it
-  if ((tempTime < 0) || (tempTime > 23)) return 0;                    // Make sure it falls in a valid range or send a "fail" result
+  int tempTime = strtol(command,&pEND,10);                              // Looks for the first integer and interprets it
+  if ((tempTime < 0) || (tempTime > 23)) return 0;                      // Make sure it falls in a valid range or send a "fail" result
   closeTime = tempTime;
-  FRAMwrite8(FRAM::closeTimeAddr,closeTime);                          // Store the new value in FRAMwrite8
+  FRAMwrite8(FRAM::closeTimeAddr,closeTime);                            // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Closing time set to %i",closeTime);
   waitUntil(meterParticlePublish);
   if (Particle.connected()) Particle.publish("Time",data, PRIVATE);
@@ -844,27 +863,27 @@ int setCloseTime(String command)
 }
 
 
-int setLowPowerMode(String command)                                   // This is where we can put the device into low power mode if needed
-{
-  if (command != "1" && command != "0") return 0;                     // Before we begin, let's make sure we have a valid input
-  controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);        // Get the control register (general approach)
-  if (command == "1")                                                 // Command calls for setting lowPowerMode
+int setLowPowerMode(String command) {                                   // This is where we can put the device into low power mode if needed
+
+  if (command != "1" && command != "0") return 0;                       // Before we begin, let's make sure we have a valid input
+  controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);          // Get the control register (general approach)
+  if (command == "1")                                                   // Command calls for setting lowPowerMode
   {
     if (verboseMode && Particle.connected()) {
       waitUntil(meterParticlePublish);
       Particle.publish("Mode","Low Power", PRIVATE);
     }
-    if ((0b00010000 & controlRegisterValue)) {                        // If we are in connected mode
-      Particle.disconnect();                                          // Otherwise Electron will attempt to reconnect on wake
-      controlRegisterValue = (0b11101111 & controlRegisterValue);     // Turn off connected mode 1 = connected and 0 = disconnected
+    if ((0b00010000 & controlRegisterValue)) {                          // If we are in connected mode
+      Particle.disconnect();                                            // Otherwise Electron will attempt to reconnect on wake
+      controlRegisterValue = (0b11101111 & controlRegisterValue);       // Turn off connected mode 1 = connected and 0 = disconnected
       connectionMode = false;
       Cellular.off();
-      delay(1000);                                                    // Bummer but only should happen once an hour
+      delay(1000);                                                      // Bummer but only should happen once an hour
     }
-    controlRegisterValue = (0b00000001 | controlRegisterValue);       // If so, flip the lowPowerMode bit
+    controlRegisterValue = (0b00000001 | controlRegisterValue);         // If so, flip the lowPowerMode bit
     lowPowerMode = true;
   }
-  else if (command == "0")                                            // Command calls for clearing lowPowerMode
+  else if (command == "0")                                              // Command calls for clearing lowPowerMode
   {
     if (verboseMode && Particle.connected()) {
       waitUntil(meterParticlePublish);
@@ -883,8 +902,7 @@ int setLowPowerMode(String command)                                   // This is
   return 1;
 }
 
-int setMaxMinLimit(String command)
-{
+int setMaxMinLimit(String command) {                                    // This limits the number of cars in an hour - also used for diagnostics
   char * pEND;
   char data[256];
   int tempMaxMinLimit = strtol(command,&pEND,10);                       // Looks for the first integer and interprets it
@@ -897,8 +915,7 @@ int setMaxMinLimit(String command)
   return 1;
 }
 
-bool meterParticlePublish(void)
-{
+bool meterParticlePublish(void) {                                       // Enforces Particle's limit on 1 publish a second
   static unsigned long lastPublish=0;                                   // Initialize and store value here
   if(millis() - lastPublish >= 1000) {                                  // Particle rate limits at 1 publish per second
     lastPublish = millis();
@@ -907,8 +924,7 @@ bool meterParticlePublish(void)
   else return 0;
 }
 
-void publishStateTransition(void)
-{
+void publishStateTransition(void) {                                     // Mainly for troubleshooting - publishes the transition between states
   char stateTransitionString[40];
   snprintf(stateTransitionString, sizeof(stateTransitionString), "From %s to %s", stateNames[oldState],stateNames[state]);
   oldState = state;
@@ -919,9 +935,9 @@ void publishStateTransition(void)
   Serial.println(stateTransitionString);
 }
 
-void fullModemReset() {  // Adapted form Rikkas7's https://github.com/rickkas7/electronsample
-	Particle.disconnect(); 	                                         // Disconnect from the cloud
-	unsigned long startTime = millis();  	                           // Wait up to 15 seconds to disconnect
+void fullModemReset() {                                                 // Adapted form Rikkas7's https://github.com/rickkas7/electronsample
+	Particle.disconnect(); 	                                              // Disconnect from the cloud
+	unsigned long startTime = millis();  	                                // Wait up to 15 seconds to disconnect
 	while(Particle.connected() && millis() - startTime < 15000) {
 		delay(100);
 	}
@@ -972,20 +988,12 @@ bool isDSTusa() {
     return false;
   }
 
-  // So, only March and November are left - time to look at days
-  // November first
-  boolean firstSundayOrAfter = (dayOfMonth - dayOfWeek > 0);
-  if (!firstSundayOrAfter)
-  { // before switching Sunday
-    return (month == 11); // November DST will be true, March not
-  }
+  boolean beforeFirstSunday = (dayOfMonth - dayOfWeek < 0);
+  boolean secondSundayOrAfter = (dayOfMonth - dayOfWeek > 7);
 
-  // Now March
-  boolean secondSundayOrAfter = (dayOfMonth - dayOfWeek > 8);
-  if (secondSundayOrAfter)
-  { // AFTER the switching Sunday
-    return (month == 3); // for March DST is true, for October not
-  }
+  if (beforeFirstSunday && !secondSundayOrAfter) return (month == 11);
+  else if (!beforeFirstSunday && !secondSundayOrAfter) return false;
+  else if (!beforeFirstSunday && secondSundayOrAfter) return (month == 3);
 
   int secSinceMidnightLocal = Time.now() % 86400;
   boolean dayStartedAs = (month == 10); // DST in October, in March not
