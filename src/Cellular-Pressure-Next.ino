@@ -48,6 +48,8 @@
 //v9 - Added logic to accomodate Daylight Savings Time for US installations - Code to smooth mempory map 9-10 can be removed later
 //v10 - Same but did not force an update to deviceOS@1.4.2
 //v11 - Adding in temp checks for charging, changing Webhook to include battery status - fixed DST calculations for US
+//v12 - Allowing TimeZone up to -13 for DST in NZ
+//v13 - Implemented NZ DST rules - ripped out -13 stuff turns out that NZ on DST is -11 not -13 - oops
 
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
@@ -81,17 +83,20 @@ const int FRAMversionNumber = 10;                       // Increment this number
 #include "PowerCheck.h"
 
 
-PRODUCT_ID(4441);                                   // Connected Counter Header
-PRODUCT_VERSION(11);
-const char releaseNumber[4] = "11";                  // Displays the release on the menu ****  this is not a production release ****
+//PRODUCT_ID(4441);                                   // Connected Counter Header
+//PRODUCT_VERSION(11);
+//#define DSTRULES isDSTusa
+//const char releaseNumber[4] = "12";                  // Displays the release on the menu ****  this is not a production release ****
 
 // PRODUCT_ID(10089);                                  // Santa Cruz Counter
 // PRODUCT_VERSION(3);
-// const char releaseNumber[6] = "3";                  // Displays the release on the menu ****  this is not a production release ****
+//#define DSTRULES isDSTusa
+// const char releaseNumber[6] = "4";                  // Displays the release on the menu ****  this is not a production release ****
 
-// PRODUCT_ID(10343);                                  // Xyst Counters
-// PRODUCT_VERSION(1);
-// const char releaseNumber[6] = "1";                  // Displays the release on the menu ****  this is not a production release ****
+ PRODUCT_ID(10343);                                  // Xyst Counters
+ PRODUCT_VERSION(3);
+ #define DSTRULES isDSTnz
+ const char releaseNumber[6] = "3";                  // Displays the release on the menu ****  this is not a production release ****
  
 
 // Prototypes and System Mode calls
@@ -271,7 +276,7 @@ void setup()                                        // Note: Disconnected Setup(
   closeTime = FRAMread8(FRAM::closeTimeAddr);
   if (closeTime < 1 || closeTime > 23) closeTime = 23;
   int8_t tempFRAMvalue = FRAMread8(FRAM::timeZoneAddr);
-  if (tempFRAMvalue >= 12 || tempFRAMvalue <= -12)  Time.zone(-5);      // Default is EST in case proper value not in FRAM
+  if (tempFRAMvalue > 12 || tempFRAMvalue < -12)  Time.zone(-5);      // Default is EST in case proper value not in FRAM
   else Time.zone((float)tempFRAMvalue);                                 // Load Timezone from FRAM
   int8_t tempDSTOffset = FRAMread8(FRAM::DSTOffsetValueAddr);           // Load the DST offset value
   if (tempDSTOffset < 0 || tempDSTOffset > 2) {
@@ -279,7 +284,7 @@ void setup()                                        // Note: Disconnected Setup(
     FRAMwrite8(FRAM::DSTOffsetValueAddr,1);                             // Write new offset value to FRAM
   } 
   else Time.setDSTOffset(tempDSTOffset);                                // Set the value from FRAM if in limits     
-  if (Time.isValid()) isDSTusa() ? Time.beginDST() : Time.endDST();     // Perform the DST calculation here 
+  if (Time.isValid()) DSTRULES() ? Time.beginDST() : Time.endDST();     // Perform the DST calculation here 
   maxMinLimit = FRAMread8(FRAM::maxMinLimitAddr);                       // This is the maximum number of counts in a minute
   if (maxMinLimit < 2 || maxMinLimit > 30) maxMinLimit = 10;            // If value has never been intialized - reasonable value
 
@@ -348,7 +353,7 @@ void loop()
       FRAMwrite8(FRAM::alertsCountAddr,0);
       if (currentHourlyPeriod == 23) resetEverything();                // We have reported for the previous day - reset for the next - only needed if no sleep
     }
-    if (Time.hour() == 2 && Time.isValid()) isDSTusa() ? Time.beginDST() : Time.endDST();    // Each day, at 2am we will check to see if we need a DST offset
+    if (Time.hour() == 2 && Time.isValid()) DSTRULES() ? Time.beginDST() : Time.endDST();    // Each day, at 2am we will check to see if we need a DST offset
     if (lowPowerMode && (millis() - stayAwakeTimeStamp) > stayAwake) state = NAPPING_STATE;  // When in low power mode, we can nap between taps
     if (Time.hour() != currentHourlyPeriod) state = REPORTING_STATE;  // We want to report on the hour but not after bedtime
     if ((Time.hour() > closeTime || Time.hour() < openTime)) state = SLEEPING_STATE;   // The park is closed - sleep - Note thie means that close time = 21 will not sleep till 22
@@ -805,12 +810,12 @@ int setTimeZone(String command) {                                       // Set t
   char data[256];
   time_t t = Time.now();
   int8_t tempTimeZoneOffset = strtol(command,&pEND,10);                 // Looks for the first integer and interprets it
-  if ((tempTimeZoneOffset < -12) | (tempTimeZoneOffset > 12)) return 0; // Make sure it falls in a valid range or send a "fail" result
+  if ((tempTimeZoneOffset < -12) || (tempTimeZoneOffset > 12)) return 0; // Make sure it falls in a valid range or send a "fail" result
   Time.zone((float)tempTimeZoneOffset);
   FRAMwrite8(FRAM::timeZoneAddr,tempTimeZoneOffset);                    // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Time zone offset %i",tempTimeZoneOffset);
   waitUntil(meterParticlePublish);
-  if (Time.isValid()) isDSTusa() ? Time.beginDST() : Time.endDST();     // Perform the DST calculation here 
+  if (Time.isValid()) DSTRULES() ? Time.beginDST() : Time.endDST();     // Perform the DST calculation here 
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);
   if (Particle.connected()) Particle.publish("Time",data, PRIVATE);
   waitUntil(meterParticlePublish);
@@ -994,6 +999,41 @@ bool isDSTusa() {
   if (beforeFirstSunday && !secondSundayOrAfter) return (month == 11);
   else if (!beforeFirstSunday && !secondSundayOrAfter) return false;
   else if (!beforeFirstSunday && secondSundayOrAfter) return (month == 3);
+
+  int secSinceMidnightLocal = Time.now() % 86400;
+  boolean dayStartedAs = (month == 10); // DST in October, in March not
+  // on switching Sunday we need to consider the time
+  if (secSinceMidnightLocal >= 2*3600)
+  { //  In the US, Daylight Time is based on local time 
+    return !dayStartedAs;
+  }
+  return dayStartedAs;
+}
+
+bool isDSTnz() { 
+  // New Zealand Summer Timer calculation (2am Local Time - last Sunday in September/ 1st Sunday in April)
+  // Adapted from @ScruffR's code posted here https://community.particle.io/t/daylight-savings-problem/38424/4
+  // The code works in from months, days and hours in succession toward the two transitions
+  int dayOfMonth = Time.day();
+  int month = Time.month();
+  int dayOfWeek = Time.weekday() - 1; // make Sunday 0 .. Saturday 6
+
+  // By Month - inside or outside the DST window - 10 out of 12 months with April and Septemper in question
+  if (month >= 10 || month <= 3)  
+  { // October to March is definetly DST - 6 months
+    return true;
+  }
+  else if (month < 9 && month > 4)
+  { // before September and after April is definetly standard time - - 4 months
+    return false;
+  }
+
+  boolean beforeFirstSunday = (dayOfMonth - dayOfWeek < 6);
+  boolean lastSundayOrAfter = (dayOfMonth - dayOfWeek > 23);
+
+  if (beforeFirstSunday && !lastSundayOrAfter) return (month == 4);
+  else if (!beforeFirstSunday && !lastSundayOrAfter) return false;
+  else if (!beforeFirstSunday && lastSundayOrAfter) return (month == 9);
 
   int secSinceMidnightLocal = Time.now() % 86400;
   boolean dayStartedAs = (month == 10); // DST in October, in March not
