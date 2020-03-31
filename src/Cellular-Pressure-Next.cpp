@@ -54,9 +54,11 @@
 //v10 - Same but did not force an update to deviceOS@1.4.2
 //v11 - Adding in temp checks for charging, changing Webhook to include battery status - fixed DST calculations for US
 //v12 - Allowing TimeZone up to -13 for DST in NZ
-//v13 - Implemented NZ DST rules - ripped out -13 stuff
+//v13 - Implemented NZ DST rules - ripped out -13 stuff turns out that NZ on DST is -11 not -13 - oops
+//v14 - Fixed issue where a low debounce could prevent updates
 
-
+// namespaces and #define statements - avoid if possible
+const int FRAMversionNumber = 10;                       // Increment this number each time the memory map is changed
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
     versionAddr           = 0x0,                    // Where we store the memory map version number
@@ -76,25 +78,10 @@ namespace FRAM {                                    // Moved to namespace instea
   };
 };
 
-const int FRAMversionNumber = 10;                       // Increment this number each time the memory map is changed
-
 // Included Libraries
 #include "Particle.h"                               // Particle's libraries - new for product 
 void setup();
 void loop();
-void recordCount();
-void sendEvent();
-void UbidotsHandler(const char *event, const char *data);
-void takeMeasurements();
-void getSignalStrength();
-int getTemperature();
-void sensorISR();
-void watchdogISR();
-void petWatchdog();
-void PMICreset();
-bool connectToParticle();
-bool disconnectFromParticle();
-bool notConnected();
 int resetFRAM(String command);
 int resetCounts(String command);
 int hardResetNow(String command);
@@ -109,6 +96,19 @@ int setOpenTime(String command);
 int setCloseTime(String command);
 int setLowPowerMode(String command);
 int setMaxMinLimit(String command);
+void recordCount();
+void sendEvent();
+void UbidotsHandler(const char *event, const char *data);
+void takeMeasurements();
+void getSignalStrength();
+int getTemperature();
+void sensorISR();
+void watchdogISR();
+void petWatchdog();
+void PMICreset();
+bool connectToParticle();
+bool disconnectFromParticle();
+bool notConnected();
 bool meterParticlePublish(void);
 void publishStateTransition(void);
 void fullModemReset();
@@ -124,37 +124,31 @@ bool isDSTnz();
 #include "PowerCheck.h"
 
 
-//PRODUCT_ID(4441);                                   // Connected Counter Header
-//PRODUCT_VERSION(11);
-//#define DSTRULES isDSTusa
-//const char releaseNumber[4] = "12";                  // Displays the release on the menu ****  this is not a production release ****
+// System Macto Instances
+SYSTEM_MODE(SEMI_AUTOMATIC);                        // This will enable user code to start executing automatically.
+SYSTEM_THREAD(ENABLED);                             // Means my code will not be held up by Particle processes.
+STARTUP(System.enableFeature(FEATURE_RESET_INFO));
 
-// PRODUCT_ID(10089);                                  // Santa Cruz Counter
-// PRODUCT_VERSION(3);
-//#define DSTRULES isDSTusa
-// const char releaseNumber[6] = "4";                  // Displays the release on the menu ****  this is not a production release ****
+
+
+// Particle Product definitions
+PRODUCT_ID(4441);                                   // Connected Counter Header
+PRODUCT_VERSION(14);
+#define DSTRULES isDSTusa
+const char releaseNumber[4] = "14";                  // Displays the release on the menu 
+/*
+ PRODUCT_ID(10089);                                  // Santa Cruz Counter
+ PRODUCT_VERSION(3);
+ #define DSTRULES isDSTusa
+ const char releaseNumber[6] = "4";                  // Displays the release on the menu 
 
  PRODUCT_ID(10343);                                  // Xyst Counters
  PRODUCT_VERSION(3);
  #define DSTRULES isDSTnz
- const char releaseNumber[6] = "3";                  // Displays the release on the menu ****  this is not a production release ****
- 
+ const char releaseNumber[6] = "3";                  // Displays the release on the menu 
+ */
 
-// Prototypes and System Mode calls
-SYSTEM_MODE(SEMI_AUTOMATIC);                        // This will enable user code to start executing automatically.
-SYSTEM_THREAD(ENABLED);                             // Means my code will not be held up by Particle processes.
-STARTUP(System.enableFeature(FEATURE_RESET_INFO));
-FuelGauge batteryMonitor;                           // Prototype for the fuel gauge (included in Particle core library)
-PMIC power;                                         //Initalize the PMIC class so you can call the Power Management functions below.
-PowerCheck powerCheck;                              // instantiates the PowerCheck class to help us provide context with charge level reporting
-ConnectionEvents connectionEvents("connEventStats");// Connection events object
-BatteryCheck batteryCheck(15.0, 3600);
-
-// State Maching Variables
-enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SLEEPING_STATE, NAPPING_STATE, REPORTING_STATE, RESP_WAIT_STATE };
-char stateNames[8][14] = {"Initialize", "Error", "Idle", "Sleeping", "Napping", "Reporting", "Response Wait" };
-State state = INITIALIZATION_STATE;
-State oldState = INITIALIZATION_STATE;
+// Constants
 
 // Pin Constants - Electron Carrier Board
 const int tmp36Pin =      A0;                       // Simple Analog temperature sensor
@@ -170,17 +164,25 @@ const int analogIn =      B2;                       // This pin sees the raw out
 const int disableModule = B3;                       // Bringining this low turns on the sensor (pull-up on sensor board)
 const int ledPower =      B4;                       // Allows us to control the indicator LED on the sensor board
 
-// Timing Variables
+// Timing Constants
 const int wakeBoundary = 1*3600 + 0*60 + 0;         // 1 hour 0 minutes 0 seconds
 const unsigned long stayAwakeLong = 90000;          // In lowPowerMode, how long to stay awake every hour
 const unsigned long webhookWait = 45000;            // How long will we wair for a WebHook response
 const unsigned long resetWait = 30000;              // How long will we wait in ERROR_STATE until reset
+
+
+// Variables
+// State Maching Variables
+enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SLEEPING_STATE, NAPPING_STATE, REPORTING_STATE, RESP_WAIT_STATE };
+char stateNames[8][14] = {"Initialize", "Error", "Idle", "Sleeping", "Napping", "Reporting", "Response Wait" };
+State state = INITIALIZATION_STATE;
+State oldState = INITIALIZATION_STATE;
+// Timing Variables
 unsigned long stayAwakeTimeStamp = 0;               // Timestamps for our timing variables..
 unsigned long stayAwake;                            // Stores the time we need to wait before napping
 unsigned long webhookTimeStamp = 0;                 // Webhooks...
 unsigned long resetTimeStamp = 0;                   // Resets - this keeps you from falling into a reset loop
 unsigned long lastPublish = 0;                      // Can only publish 1/sec on avg and 4/sec burst
-
 // Program Variables
 int temperatureF;                                   // Global variable so we can monitor via cloud variable
 int resetCount;                                     // Counts the number of times the Electron has had a pin reset
@@ -194,20 +196,16 @@ bool solarPowerMode;                                // Changes the PMIC settings
 bool verboseMode;                                   // Enables more active communications for configutation and setup
 char SignalString[64];                              // Used to communicate Wireless RSSI and Description
 const char* radioTech[10] = {"Unknown","None","WiFi","GSM","UMTS","CDMA","LTE","IEEE802154","LTE_CAT_M1","LTE_CAT_NB1"};
-
-// Time Related Variables
+// Daily Operations Variables
 int openTime;                                       // Park Opening time - (24 hr format) sets waking
 int closeTime;                                      // Park Closing time - (24 hr format) sets sleep
 byte currentDailyPeriod;                            // Current day
 byte currentHourlyPeriod;                           // This is where we will know if the period changed
 char currentOffsetStr[10];                          // What is our offset from UTC
-
 // Battery monitoring
 int stateOfCharge = 0;                              // stores battery charge level value
 char powerContext[24];                              // One word that describes whether the device is getting power, charging, discharging or too cold to charge
-
-// This section is where we will initialize sensor specific variables, libraries and function prototypes
-// Pressure Sensor Variables
+// Sensor Variables
 u_int16_t debounce;                                 // This is the numerical value of debounce - in millis()
 char debounceStr[8] = "NA";                         // String to make debounce more readable on the mobile app
 volatile bool sensorDetect = false;                 // This is the flag that an interrupt is triggered
@@ -215,12 +213,17 @@ unsigned long currentEvent = 0;                     // Time for the current sens
 int hourlyEventCount = 0;                          // hourly counter
 int hourlyEventCountSent = 0;                      // Person count in flight to Ubidots
 int dailyEventCount = 0;                           // daily counter
-
-// These are diagnostic measures that I am playing with
+// Diagnostic Variables
 int alerts = 0;                                     // Alerts are triggered when MaxMinLimit is exceeded or a reset due to errors
 int maxMin = 0;                                     // What is the current maximum count in a minute for this reporting period
 int maxMinLimit;                                    // Counts above this amount will be deemed erroroneus
 
+// Prototypes and System Mode calls
+FuelGauge batteryMonitor;                           // Prototype for the fuel gauge (included in Particle core library)
+PMIC power;                                         //Initalize the PMIC class so you can call the Power Management functions below.
+PowerCheck powerCheck;                              // instantiates the PowerCheck class to help us provide context with charge level reporting
+ConnectionEvents connectionEvents("connEventStats");// Connection events object
+BatteryCheck batteryCheck(15.0, 3600);
 
 void setup()                                        // Note: Disconnected Setup()
 {
@@ -425,7 +428,7 @@ void loop()
       connectionMode = false;
       FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);     // Write to the control register
     }
-    stayAwake = debounce;                                             // Once we come into this function, we need to reset stayAwake as it changes at the top of the hour                                                 
+    (debounce < 1000) ? stayAwake = 1000 : stayAwake = debounce;      // Once we come into this function, we need to reset stayAwake as it changes at the top of the hour                                                 
     int wakeInSeconds = constrain(wakeBoundary - Time.now() % wakeBoundary, 1, wakeBoundary);
     petWatchdog();                                                    // Reset the watchdog
     System.sleep(intPin, RISING, wakeInSeconds);                      // Sensor will wake us with an interrupt or timeout at the hour
@@ -495,234 +498,8 @@ void loop()
   batteryCheck.loop();
 }
 
-void recordCount() // This is where we check to see if an interrupt is set when not asleep or act on a tap that woke the Arduino
-{
-  static int currentMinuteCount = 0;                                  // What is the count for the current minute
-  static byte currentMinutePeriod;                                    // Current minute
-
-  pinSetFast(blueLED);                                                // Turn on the blue LED
-
-  if (millis() - currentEvent >= debounce || awokeFromNap) {          // If this event is outside the debounce time, proceed
-    currentEvent = millis();
-    awokeFromNap = false;                                             // Reset the awoke flag
-    while(millis()-currentEvent < debounce) {                         // Keep us tied up here until the debounce time is up
-      delay(10);
-      Particle.process();                                             // Just in case debouce gets set to some big number
-    }
-
-    // Diagnostic code
-    if (currentMinutePeriod != Time.minute()) {                       // Done counting for the last minute
-      currentMinutePeriod = Time.minute();                            // Reset period
-      currentMinuteCount = 1;                                         // Reset for the new minute
-    }
-    else currentMinuteCount++;
-
-    if (currentMinuteCount >= maxMin) maxMin = currentMinuteCount;    // Save only if it is the new maxMin
-    // End diagnostic code
-
-    // Set an alert if we exceed the MaxMinLimit
-    if (currentMinuteCount >= maxMinLimit) {
-      if (verboseMode && Particle.connected()) {
-        waitUntil(meterParticlePublish);
-        Particle.publish("Alert", "Exceeded Maxmin limit", PRIVATE);
-      }
-      alerts++;
-      FRAMwrite8(FRAM::alertsCountAddr,alerts);                        // Save counts in case of reset
-    }
-
-    hourlyEventCount++;                                                // Increment the PersonCount
-    FRAMwrite16(FRAM::currentHourlyCountAddr, hourlyEventCount);       // Load Hourly Count to memory
-    dailyEventCount++;                                                 // Increment the PersonCount
-    FRAMwrite16(FRAM::currentDailyCountAddr, dailyEventCount);         // Load Daily Count to memory
-    FRAMwrite32(FRAM::currentCountsTimeAddr, Time.now());              // Write to FRAM - this is so we know when the last counts were saved
-    if (verboseMode && Particle.connected()) {
-      char data[256];                                                    // Store the date in this character array - not global
-      snprintf(data, sizeof(data), "Count, hourly: %i, daily: %i",hourlyEventCount,dailyEventCount);
-      waitUntil(meterParticlePublish);
-      Particle.publish("Count",data, PRIVATE);                                   // Helpful for monitoring and calibration
-    }
-  }
-  else if(verboseMode && Particle.connected()) {
-    waitUntil(meterParticlePublish);
-    Particle.publish("Event","Debounced", PRIVATE);
-  }
-
-  if (!digitalRead(userSwitch)) {                     // A low value means someone is pushing this button - will trigger a send to Ubidots and take out of low power mode
-    connectToParticle();                              // Get connected to Particle
-    waitUntil(meterParticlePublish);
-    if (Particle.connected()) Particle.publish("Mode","Normal Operations", PRIVATE);
-    controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);      // Load the control register
-    controlRegisterValue = (0b1111110 & controlRegisterValue);        // Will set the lowPowerMode bit to zero
-    controlRegisterValue = (0b00010000 | controlRegisterValue);       // Turn on the connectionMode
-    FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);
-    lowPowerMode = false;
-    connectionMode = true;
-  }
-  pinResetFast(blueLED);
-  sensorDetect = false;                                               // Reset the flag
-}
-
-
-void sendEvent()
-{
-  char data[256];                                                     // Store the date in this character array - not global
-  snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i, \"battery\":%i, \"key1\":\"%s\", \"temp\":%i, \"resets\":%i, \"alerts\":%i, \"maxmin\":%i}",hourlyEventCount, dailyEventCount, stateOfCharge, powerContext, temperatureF, resetCount, alerts, maxMin);
-  Particle.publish("Ubidots-Counter-Hook-v1", data, PRIVATE);
-  webhookTimeStamp = millis();
-  currentHourlyPeriod = Time.hour();                                  // Change the time period
-  if(currentHourlyPeriod == 23) hourlyEventCount++;                  // Ensures we don't have a zero here at midnigtt
-  hourlyEventCountSent = hourlyEventCount;                          // This is the number that was sent to Ubidots - will be subtracted once we get confirmation
-  dataInFlight = true;                                                // set the data inflight flag
-}
-
-void UbidotsHandler(const char *event, const char *data)              // Looks at the response from Ubidots - Will reset Photon if no successful response
-{                                                                     // Response Template: "{{hourly.0.status_code}}" so, I should only get a 3 digit number back
-  char dataCopy[strlen(data)+1];                                      // data needs to be copied since if (Particle.connected()) Particle.publish() will clear it
-  strncpy(dataCopy, data, sizeof(dataCopy));                          // Copy - overflow safe
-  if (!strlen(dataCopy)) {                                            // First check to see if there is any data
-    waitUntil(meterParticlePublish);
-    if (Particle.connected()) Particle.publish("Ubidots Hook", "No Data", PRIVATE);
-    return;
-  }
-  int responseCode = atoi(dataCopy);                                  // Response is only a single number thanks to Template
-  if ((responseCode == 200) || (responseCode == 201))
-  {
-    waitUntil(meterParticlePublish);
-    if (Particle.connected()) Particle.publish("State","Response Received", PRIVATE);
-    FRAMwrite32(FRAM::lastHookResponseAddr,Time.now());                     // Record the last successful Webhook Response
-    dataInFlight = false;                                             // Data has been received
-  }
-  else if (Particle.connected()) Particle.publish("Ubidots Hook", dataCopy, PRIVATE);                    // Publish the response code
-}
-
-// These are the functions that are part of the takeMeasurements call
-void takeMeasurements()
-{
-  if (Cellular.ready()) getSignalStrength();                          // Test signal strength if the cellular modem is on and ready
-  stateOfCharge = int(batteryMonitor.getSoC());                       // Percentage of full charge
-
-  getTemperature();                                                   // Load the current temp
-
-  if (temperatureF <= 32 || temperatureF >= 113) {                      // Need to add temp charging controls - 
-    snprintf(powerContext, sizeof(powerContext), "Chg Disabled Temp");
-    power.disableCharging();                                          // Disable Charging if temp is too low or too high
-    waitUntil(meterParticlePublish);
-    if (Particle.connected()) Particle.publish("Alert", "Charging disabled Temperature",PRIVATE);
-    return;                                                           // Return to avoid the enableCharging command at the end of the IF statement
-  }
-  else if (powerCheck.getIsCharging()) {
-    snprintf(powerContext, sizeof(powerContext), "Charging");
-  }
-  else if (powerCheck.getHasPower()) {
-    snprintf(powerContext, sizeof(powerContext), "DC-In Powered");
-  }
-  else if (powerCheck.getHasBattery()) {
-    snprintf(powerContext, sizeof(powerContext), "Battery Discharging");
-  }
-  else snprintf(powerContext, sizeof(powerContext), "Undetermined");
-
-  power.enableCharging();                                               // We are good to charge 
-}
-
-
-void getSignalStrength()
-{
-  // New Signal Strength capability - https://community.particle.io/t/boron-lte-and-cellular-rssi-funny-values/45299/8
-  CellularSignal sig = Cellular.RSSI();
-
-  auto rat = sig.getAccessTechnology();
- 
-  //float strengthVal = sig.getStrengthValue();
-  float strengthPercentage = sig.getStrength();
-
-  //float qualityVal = sig.getQualityValue();
-  float qualityPercentage = sig.getQuality();
-
-  snprintf(SignalString,sizeof(SignalString), "%s S:%2.0f%%, Q:%2.0f%% ", radioTech[rat], strengthPercentage, qualityPercentage);
-}
-
-int getTemperature() {
-  int reading = analogRead(tmp36Pin);                                 //getting the voltage reading from the temperature sensor
-  float voltage = reading * 3.3;                                      // converting that reading to voltage, for 3.3v arduino use 3.3
-  voltage /= 4096.0;                                                  // Electron is different than the Arduino where there are only 1024 steps
-  int temperatureC = int(((voltage - 0.5) * 100));                    //converting from 10 mv per degree with 500 mV offset to degrees ((voltage - 500mV) times 100) - 5 degree calibration
-
-  temperatureF = int((temperatureC * 9.0 / 5.0) + 32.0);              // now convert to Fahrenheit
-
-  return temperatureF;
-}
-
-// Here are the various hardware and timer interrupt service routines
-void sensorISR() {
-  sensorDetect = true;                              // sets the sensor flag for the main loop
-}
-
-void watchdogISR() {
-  watchdogFlag = true;
-}
-
-void petWatchdog() {
-  digitalWriteFast(donePin, HIGH);                                        // Pet the watchdog
-  digitalWriteFast(donePin, LOW);
-  watchdogFlag = false;
-}
-
-// Power Management function
-void PMICreset() {
-  power.begin();                                                      // Settings for Solar powered power management
-  power.disableWatchdog();
-  if (solarPowerMode) {
-    power.setInputVoltageLimit(4840);                                 // Set the lowest input voltage to 4.84 volts best setting for 6V solar panels
-    power.setInputCurrentLimit(900);                                  // default is 900mA
-    power.setChargeCurrent(0,0,1,0,0,0);                              // default is 512mA matches my 3W panel
-    power.setChargeVoltage(4208);                                     // Allows us to charge cloe to 100% - battery can't go over 45 celcius
-  }
-  else  {
-    power.setInputVoltageLimit(4208);                                 // This is the default value for the Electron
-    power.setInputCurrentLimit(1500);                                 // default is 900mA this let's me charge faster
-    power.setChargeCurrent(0,1,1,0,0,0);                              // default is 2048mA (011000) = 512mA+1024mA+512mA)
-    power.setChargeVoltage(4112);                                     // default is 4.112V termination voltage
-  }
-}
-
- // These are the particle functions that allow you to configure and run the device
- // They are intended to allow for customization and control during installations
- // and to allow for management.
-
-bool connectToParticle() {
-  Cellular.on();
-  Particle.connect();
-  // wait for *up to* 5 minutes
-  for (int retry = 0; retry < 300 && !waitFor(Particle.connected,1000); retry++) {
-    if(sensorDetect) recordCount(); // service the interrupt every second
-    Particle.process();
-  }
-  if (Particle.connected()) {
-    controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);        // Get the control register (general approach)
-    controlRegisterValue = (0b00010000 | controlRegisterValue);         // Turn on connected mode 1 = connected and 0 = disconnected
-    FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);         // Write to the control register
-    return 1;                                                           // Were able to connect successfully
-  }
-  else {
-    return 0;                                                           // Failed to connect
-  }
-}
-
-bool disconnectFromParticle() {                                         // Ensures we disconnect cleanly from Particle
-  Particle.disconnect();
-  for (int retry = 0; retry < 15 && !waitFor(notConnected, 1000); retry++) {  // make sure before turning off the cellular modem
-    if(sensorDetect) recordCount(); // service the interrupt every second
-    Particle.process();
-  }
-  Cellular.off();
-  delay(2000);                                                          // Bummer but only should happen once an hour
-  return true;
-}
-
-bool notConnected() {                                                   // Companion function for disconnectFromParticle
-  return !Particle.connected();
-}
-
+// Functions that support the Particle Functions defined in Setup()
+// These are called from the console or via an API call
 int resetFRAM(String command)                                           // Will reset the local counts
 {
   if (command == "1")
@@ -908,7 +685,6 @@ int setCloseTime(String command) {                                      // Set t
   return 1;
 }
 
-
 int setLowPowerMode(String command) {                                   // This is where we can put the device into low power mode if needed
 
   if (command != "1" && command != "0") return 0;                       // Before we begin, let's make sure we have a valid input
@@ -959,6 +735,233 @@ int setMaxMinLimit(String command) {                                    // This 
   waitUntil(meterParticlePublish);
   if (Particle.connected()) Particle.publish("MaxMin",data,PRIVATE);
   return 1;
+}
+
+// Here are the primary "business" functions that are specific to this devices function
+void recordCount() // This is where we check to see if an interrupt is set when not asleep or act on a tap that woke the Arduino
+{
+  static int currentMinuteCount = 0;                                  // What is the count for the current minute
+  static byte currentMinutePeriod;                                    // Current minute
+
+  pinSetFast(blueLED);                                                // Turn on the blue LED
+
+  if (millis() - currentEvent >= debounce || awokeFromNap) {          // If this event is outside the debounce time, proceed
+    currentEvent = millis();
+    awokeFromNap = false;                                             // Reset the awoke flag
+    while(millis()-currentEvent < debounce) {                         // Keep us tied up here until the debounce time is up
+      delay(10);
+      Particle.process();                                             // Just in case debouce gets set to some big number
+    }
+
+    // Diagnostic code
+    if (currentMinutePeriod != Time.minute()) {                       // Done counting for the last minute
+      currentMinutePeriod = Time.minute();                            // Reset period
+      currentMinuteCount = 1;                                         // Reset for the new minute
+    }
+    else currentMinuteCount++;
+
+    if (currentMinuteCount >= maxMin) maxMin = currentMinuteCount;    // Save only if it is the new maxMin
+    // End diagnostic code
+
+    // Set an alert if we exceed the MaxMinLimit
+    if (currentMinuteCount >= maxMinLimit) {
+      if (verboseMode && Particle.connected()) {
+        waitUntil(meterParticlePublish);
+        Particle.publish("Alert", "Exceeded Maxmin limit", PRIVATE);
+      }
+      alerts++;
+      FRAMwrite8(FRAM::alertsCountAddr,alerts);                        // Save counts in case of reset
+    }
+
+    hourlyEventCount++;                                                // Increment the PersonCount
+    FRAMwrite16(FRAM::currentHourlyCountAddr, hourlyEventCount);       // Load Hourly Count to memory
+    dailyEventCount++;                                                 // Increment the PersonCount
+    FRAMwrite16(FRAM::currentDailyCountAddr, dailyEventCount);         // Load Daily Count to memory
+    FRAMwrite32(FRAM::currentCountsTimeAddr, Time.now());              // Write to FRAM - this is so we know when the last counts were saved
+    if (verboseMode && Particle.connected()) {
+      char data[256];                                                    // Store the date in this character array - not global
+      snprintf(data, sizeof(data), "Count, hourly: %i, daily: %i",hourlyEventCount,dailyEventCount);
+      waitUntil(meterParticlePublish);
+      Particle.publish("Count",data, PRIVATE);                                   // Helpful for monitoring and calibration
+    }
+  }
+  else if(verboseMode && Particle.connected()) {
+    waitUntil(meterParticlePublish);
+    Particle.publish("Event","Debounced", PRIVATE);
+  }
+
+  if (!digitalRead(userSwitch)) {                     // A low value means someone is pushing this button - will trigger a send to Ubidots and take out of low power mode
+    connectToParticle();                              // Get connected to Particle
+    waitUntil(meterParticlePublish);
+    if (Particle.connected()) Particle.publish("Mode","Normal Operations", PRIVATE);
+    controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);      // Load the control register
+    controlRegisterValue = (0b1111110 & controlRegisterValue);        // Will set the lowPowerMode bit to zero
+    controlRegisterValue = (0b00010000 | controlRegisterValue);       // Turn on the connectionMode
+    FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);
+    lowPowerMode = false;
+    connectionMode = true;
+  }
+  pinResetFast(blueLED);
+  sensorDetect = false;                                               // Reset the flag
+}
+
+
+void sendEvent()
+{
+  char data[256];                                                     // Store the date in this character array - not global
+  snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i, \"battery\":%i, \"key1\":\"%s\", \"temp\":%i, \"resets\":%i, \"alerts\":%i, \"maxmin\":%i}",hourlyEventCount, dailyEventCount, stateOfCharge, powerContext, temperatureF, resetCount, alerts, maxMin);
+  Particle.publish("Ubidots-Counter-Hook-v1", data, PRIVATE);
+  webhookTimeStamp = millis();
+  currentHourlyPeriod = Time.hour();                                  // Change the time period
+  if(currentHourlyPeriod == 23) hourlyEventCount++;                  // Ensures we don't have a zero here at midnigtt
+  hourlyEventCountSent = hourlyEventCount;                          // This is the number that was sent to Ubidots - will be subtracted once we get confirmation
+  dataInFlight = true;                                                // set the data inflight flag
+}
+
+void UbidotsHandler(const char *event, const char *data)              // Looks at the response from Ubidots - Will reset Photon if no successful response
+{                                                                     // Response Template: "{{hourly.0.status_code}}" so, I should only get a 3 digit number back
+  char dataCopy[strlen(data)+1];                                      // data needs to be copied since if (Particle.connected()) Particle.publish() will clear it
+  strncpy(dataCopy, data, sizeof(dataCopy));                          // Copy - overflow safe
+  if (!strlen(dataCopy)) {                                            // First check to see if there is any data
+    waitUntil(meterParticlePublish);
+    if (Particle.connected()) Particle.publish("Ubidots Hook", "No Data", PRIVATE);
+    return;
+  }
+  int responseCode = atoi(dataCopy);                                  // Response is only a single number thanks to Template
+  if ((responseCode == 200) || (responseCode == 201))
+  {
+    waitUntil(meterParticlePublish);
+    if (Particle.connected()) Particle.publish("State","Response Received", PRIVATE);
+    FRAMwrite32(FRAM::lastHookResponseAddr,Time.now());                     // Record the last successful Webhook Response
+    dataInFlight = false;                                             // Data has been received
+  }
+  else if (Particle.connected()) Particle.publish("Ubidots Hook", dataCopy, PRIVATE);                    // Publish the response code
+}
+
+// These are the functions that are part of the takeMeasurements call
+void takeMeasurements()
+{
+  if (Cellular.ready()) getSignalStrength();                          // Test signal strength if the cellular modem is on and ready
+  stateOfCharge = int(batteryMonitor.getSoC());                       // Percentage of full charge
+
+  getTemperature();                                                   // Load the current temp
+
+  if (temperatureF <= 32 || temperatureF >= 113) {                      // Need to add temp charging controls - 
+    snprintf(powerContext, sizeof(powerContext), "Chg Disabled Temp");
+    power.disableCharging();                                          // Disable Charging if temp is too low or too high
+    waitUntil(meterParticlePublish);
+    if (Particle.connected()) Particle.publish("Alert", "Charging disabled Temperature",PRIVATE);
+    return;                                                           // Return to avoid the enableCharging command at the end of the IF statement
+  }
+  else if (powerCheck.getIsCharging()) {
+    snprintf(powerContext, sizeof(powerContext), "Charging");
+  }
+  else if (powerCheck.getHasPower()) {
+    snprintf(powerContext, sizeof(powerContext), "DC-In Powered");
+  }
+  else if (powerCheck.getHasBattery()) {
+    snprintf(powerContext, sizeof(powerContext), "Battery Discharging");
+  }
+  else snprintf(powerContext, sizeof(powerContext), "Undetermined");
+
+  power.enableCharging();                                               // We are good to charge 
+}
+
+
+void getSignalStrength()
+{
+  // New Signal Strength capability - https://community.particle.io/t/boron-lte-and-cellular-rssi-funny-values/45299/8
+  CellularSignal sig = Cellular.RSSI();
+
+  auto rat = sig.getAccessTechnology();
+ 
+  //float strengthVal = sig.getStrengthValue();
+  float strengthPercentage = sig.getStrength();
+
+  //float qualityVal = sig.getQualityValue();
+  float qualityPercentage = sig.getQuality();
+
+  snprintf(SignalString,sizeof(SignalString), "%s S:%2.0f%%, Q:%2.0f%% ", radioTech[rat], strengthPercentage, qualityPercentage);
+}
+
+int getTemperature() {
+  int reading = analogRead(tmp36Pin);                                 //getting the voltage reading from the temperature sensor
+  float voltage = reading * 3.3;                                      // converting that reading to voltage, for 3.3v arduino use 3.3
+  voltage /= 4096.0;                                                  // Electron is different than the Arduino where there are only 1024 steps
+  int temperatureC = int(((voltage - 0.5) * 100));                    //converting from 10 mv per degree with 500 mV offset to degrees ((voltage - 500mV) times 100) - 5 degree calibration
+
+  temperatureF = int((temperatureC * 9.0 / 5.0) + 32.0);              // now convert to Fahrenheit
+
+  return temperatureF;
+}
+
+
+// Here are the various hardware and timer interrupt service routines
+// These are supplemental or utility functions
+void sensorISR() {
+  sensorDetect = true;                              // sets the sensor flag for the main loop
+}
+
+void watchdogISR() {
+  watchdogFlag = true;
+}
+
+void petWatchdog() {
+  digitalWriteFast(donePin, HIGH);                                        // Pet the watchdog
+  digitalWriteFast(donePin, LOW);
+  watchdogFlag = false;
+}
+
+// Power Management function
+void PMICreset() {
+  power.begin();                                                      // Settings for Solar powered power management
+  power.disableWatchdog();
+  if (solarPowerMode) {
+    power.setInputVoltageLimit(4840);                                 // Set the lowest input voltage to 4.84 volts best setting for 6V solar panels
+    power.setInputCurrentLimit(900);                                  // default is 900mA
+    power.setChargeCurrent(0,0,1,0,0,0);                              // default is 512mA matches my 3W panel
+    power.setChargeVoltage(4208);                                     // Allows us to charge cloe to 100% - battery can't go over 45 celcius
+  }
+  else  {
+    power.setInputVoltageLimit(4208);                                 // This is the default value for the Electron
+    power.setInputCurrentLimit(1500);                                 // default is 900mA this let's me charge faster
+    power.setChargeCurrent(0,1,1,0,0,0);                              // default is 2048mA (011000) = 512mA+1024mA+512mA)
+    power.setChargeVoltage(4112);                                     // default is 4.112V termination voltage
+  }
+}
+
+bool connectToParticle() {
+  Cellular.on();
+  Particle.connect();
+  // wait for *up to* 5 minutes
+  for (int retry = 0; retry < 300 && !waitFor(Particle.connected,1000); retry++) {
+    if(sensorDetect) recordCount(); // service the interrupt every second
+    Particle.process();
+  }
+  if (Particle.connected()) {
+    controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);        // Get the control register (general approach)
+    controlRegisterValue = (0b00010000 | controlRegisterValue);         // Turn on connected mode 1 = connected and 0 = disconnected
+    FRAMwrite8(FRAM::controlRegisterAddr,controlRegisterValue);         // Write to the control register
+    return 1;                                                           // Were able to connect successfully
+  }
+  else {
+    return 0;                                                           // Failed to connect
+  }
+}
+
+bool disconnectFromParticle() {                                         // Ensures we disconnect cleanly from Particle
+  Particle.disconnect();
+  for (int retry = 0; retry < 15 && !waitFor(notConnected, 1000); retry++) {  // make sure before turning off the cellular modem
+    if(sensorDetect) recordCount(); // service the interrupt every second
+    Particle.process();
+  }
+  Cellular.off();
+  delay(2000);                                                          // Bummer but only should happen once an hour
+  return true;
+}
+
+bool notConnected() {                                                   // Companion function for disconnectFromParticle
+  return !Particle.connected();
 }
 
 bool meterParticlePublish(void) {                                       // Enforces Particle's limit on 1 publish a second
