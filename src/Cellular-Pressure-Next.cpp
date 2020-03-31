@@ -220,7 +220,7 @@ int maxMinLimit;                                    // Counts above this amount 
 
 // Prototypes and System Mode calls
 FuelGauge batteryMonitor;                           // Prototype for the fuel gauge (included in Particle core library)
-PMIC power;                                         //Initalize the PMIC class so you can call the Power Management functions below.
+PMIC pmic;                                         //Initalize the PMIC class so you can call the Power Management functions below.
 PowerCheck powerCheck;                              // instantiates the PowerCheck class to help us provide context with charge level reporting
 ConnectionEvents connectionEvents("connEventStats");// Connection events object
 BatteryCheck batteryCheck(15.0, 3600);
@@ -848,7 +848,7 @@ void takeMeasurements()
 
   if (temperatureF <= 32 || temperatureF >= 113) {                      // Need to add temp charging controls - 
     snprintf(powerContext, sizeof(powerContext), "Chg Disabled Temp");
-    power.disableCharging();                                          // Disable Charging if temp is too low or too high
+    pmic.disableCharging();                                          // Disable Charging if temp is too low or too high
     waitUntil(meterParticlePublish);
     if (Particle.connected()) Particle.publish("Alert", "Charging disabled Temperature",PRIVATE);
     return;                                                           // Return to avoid the enableCharging command at the end of the IF statement
@@ -864,7 +864,7 @@ void takeMeasurements()
   }
   else snprintf(powerContext, sizeof(powerContext), "Undetermined");
 
-  power.enableCharging();                                               // We are good to charge 
+  pmic.enableCharging();                                               // We are good to charge 
 }
 
 
@@ -914,19 +914,19 @@ void petWatchdog() {
 
 // Power Management function
 void PMICreset() {
-  power.begin();                                                      // Settings for Solar powered power management
-  power.disableWatchdog();
+  pmic.begin();                                                      // Settings for Solar powered power management
+  pmic.disableWatchdog();
   if (solarPowerMode) {
-    power.setInputVoltageLimit(4840);                                 // Set the lowest input voltage to 4.84 volts best setting for 6V solar panels
-    power.setInputCurrentLimit(900);                                  // default is 900mA
-    power.setChargeCurrent(0,0,1,0,0,0);                              // default is 512mA matches my 3W panel
-    power.setChargeVoltage(4208);                                     // Allows us to charge cloe to 100% - battery can't go over 45 celcius
+    pmic.setInputVoltageLimit(4840);                                 // Set the lowest input voltage to 4.84 volts best setting for 6V solar panels
+    pmic.setInputCurrentLimit(900);                                  // default is 900mA
+    pmic.setChargeCurrent(0,0,1,0,0,0);                              // default is 512mA matches my 3W panel
+    pmic.setChargeVoltage(4208);                                     // Allows us to charge cloe to 100% - battery can't go over 45 celcius
   }
   else  {
-    power.setInputVoltageLimit(4208);                                 // This is the default value for the Electron
-    power.setInputCurrentLimit(1500);                                 // default is 900mA this let's me charge faster
-    power.setChargeCurrent(0,1,1,0,0,0);                              // default is 2048mA (011000) = 512mA+1024mA+512mA)
-    power.setChargeVoltage(4112);                                     // default is 4.112V termination voltage
+    pmic.setInputVoltageLimit(4208);                                 // This is the default value for the Electron
+    pmic.setInputCurrentLimit(1500);                                 // default is 900mA this let's me charge faster
+    pmic.setChargeCurrent(0,1,1,0,0,0);                              // default is 2048mA (011000) = 512mA+1024mA+512mA)
+    pmic.setChargeVoltage(4112);                                     // default is 4.112V termination voltage
   }
 }
 
