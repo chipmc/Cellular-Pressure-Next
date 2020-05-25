@@ -32,8 +32,8 @@
  *
  *
  * B1 - Interrupt pin from pressure sensor module #1
- * B2 - Interupt pin from pressure sensor module #2
- * B3 - Active low to turn module on
+ * B2 - Active low to turn module on
+ * B3 - Interupt pin from pressure sensor module #2
  * B4 - Turns on and off the led on the pressure sensor module
  * D6 - Done Pin - connected to Watchdog Timer
  * D7 - LED on Electron board - LEDPIN

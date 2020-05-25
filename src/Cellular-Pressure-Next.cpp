@@ -4,7 +4,7 @@
 
 #line 1 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Pressure-Next/src/Cellular-Pressure-Next.ino"
 /*
-* Project Cellular-MMA8452Q - converged software for Low Power and Solar
+* Project Electron-Connected-Counters-Dual-Sensor - converged software for Low Power and Solar
 * Description: Cellular Connected Data Logger for Utility and Solar powered installations
 * Author: Chip McClelland
 * Date:10 January 2018
@@ -20,42 +20,14 @@
     Control Register - bits 7-5, 4-Connected Status, 3 - Verbose Mode, 2- Solar Power Mode, 1 - Low Battery Mode, 0 - Low Power Mode
 */
 
-//v1.02 - Updated to zero alerts on reset and clear
-//v1.03 - Enabled 24 hour operations
-//v1.04 - Makes sure count gets reset at 11pm since Ubidots will miscount if we wait till midnight
-//v1.04a - Fix to 1.04 for non-zero count hours
-//v1.04b - Makes sure reset happens at 2300 hours - so Ubidots counts correctly
-//v1.05 - Updated the Signal reporting for the console / mobile app
-//v1.06 - Added ConnectionEVents from Rick's Electron Sample
-//v1.07 - Added the full electronsample suite of tests
-//v1.08 - Moved over to Rick's low battery checks - eliminated state
-//v1.09 - Took out connection check as it was causing hourly reboots
-//v1.10 - Added a syncTime instruction when there is a new day
-//v1.11 - Took our alert increment except in exceeing maxMinLimit
-//v1.12 - Took out App watchdog, session monitoring, added reset session on Webhook timeout and reset if more than 2 hrs on webhook
-//v1.13 - Added some messaging to the ERROR_STATE
-//v1.14 - More responsive to counts while connecting, better Synctime and revert to lowPower daily if on Solar
-//v1.15 - Fixed reset do loop if more than 4 resets and more than 2 hours since reporting (or a new install)
-//v1.16 - Added logic for when connections are not successful
-//v1.17 - Fix for MaxMinLimit Particle variable
-//v1.18 - Semi-Automatic mode vs. manual mode
-//v1.19 - Improved disconnectFromParticle()
-//v1.20 - Improved meterParticlePublish - fix for note getting connected with user button
-//v1.21 - Added a nightly cleanup function for time, lowPower and verboseMode
-//v1.21b - Fixed an error in meterParticlePublish()
-//v2 - Turn off the LED on the sensor after Setup. Moving to product firmware numbering - integer
-//v3 - Preventing an update while data is being uploaded
-//v4 - Updated to see if the System calls to enable and disable calls are interferring with updates
-//v5 - Reduced the time that we are not available for update
-//v6 - Fixed Publish rate limit issues
-//v7 - Variable pin definitions based on device type - Electron or Boron
-//v8 - Moved to being Electron specific.  Took out code to delete counts over maxMin
-//v9 - Added logic to accomodate Daylight Savings Time for US installations - Code to smooth mempory map 9-10 can be removed later
-//v10 - Same but did not force an update to deviceOS@1.4.2
-//v11 - Adding in temp checks for charging, changing Webhook to include battery status - fixed DST calculations for US
-//v12 - Allowing TimeZone up to -13 for DST in NZ
-//v13 - Implemented NZ DST rules - ripped out -13 stuff turns out that NZ on DST is -11 not -13 - oops
-//v14 - Fixed issue where a low debounce could prevent updates
+//v1.0 - Added the capability to monitor a second counter to track cumulative traffic in a parking lot.
+//v1.1 - Changed the way we count out to improve accuracy - no bebounce / back-tire counting
+//v1.2 - Added a feature to catch missed counts on the outbound tube
+//v1.3 - Changed to adaptive reporting.  Will "report" whenever the net value changes by 20 (fixed now much could make settable later)
+//v1.4 - Added a Particle Variable for net count and increased the time before we complete a missed out count
+//v1.5 - Reducing the likelyhood that a stray frontTireFlag will be counted 4 x debounce now
+
+
 
 // namespaces and #define statements - avoid if possible
 const int FRAMversionNumber = 10;                       // Increment this number each time the memory map is changed
@@ -69,12 +41,14 @@ namespace FRAM {                                    // Moved to namespace instea
     closeTimeAddr         = 0x6,                    // Hour for closing of the park / store / etc - military time (e.g 23 is 11pm)
     controlRegisterAddr   = 0x7,                    // This is the control register for storing the current state
     currentHourlyCountAddr =0x8,                    // Current Hourly Count - 16 bits
+    currentNetCountAddr   = 0xA,                    // Current net count - when there are two sensors and you are tracking In - Out counts
     currentDailyCountAddr = 0xC,                    // Current Daily Count - 16 bits
     currentCountsTimeAddr = 0xE,                    // Time of last count - 32 bits
     alertsCountAddr       = 0x12,                   // Current Hour Alerts Count - one Byte
     maxMinLimitAddr       = 0x13,                   // Current value for MaxMin Limit - one Byte
     lastHookResponseAddr  = 0x14,                   // When is the last time we got a valid Webhook Response - 32 bits
     DSTOffsetValueAddr    = 0x18                    // When we apply Daylight Savings Time - what is the offset (0.0 to 2.0) - byte
+    
   };
 };
 
@@ -96,13 +70,15 @@ int setOpenTime(String command);
 int setCloseTime(String command);
 int setLowPowerMode(String command);
 int setMaxMinLimit(String command);
+int setNetCount(String command);
 void recordCount();
 void sendEvent();
 void UbidotsHandler(const char *event, const char *data);
 void takeMeasurements();
 void getSignalStrength();
 int getTemperature();
-void sensorISR();
+void sensor1ISR();
+void sensor2ISR();
 void watchdogISR();
 void petWatchdog();
 void PMICreset();
@@ -115,7 +91,7 @@ void fullModemReset();
 void dailyCleanup();
 bool isDSTusa();
 bool isDSTnz();
-#line 78 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Pressure-Next/src/Cellular-Pressure-Next.ino"
+#line 52 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Pressure-Next/src/Cellular-Pressure-Next.ino"
 #include "Adafruit_FRAM_I2C.h"                      // Library for FRAM functions
 #include "FRAM-Library-Extensions.h"                // Extends the FRAM Library
 #include "electrondoc.h"                            // Documents pinout
@@ -129,24 +105,12 @@ SYSTEM_MODE(SEMI_AUTOMATIC);                        // This will enable user cod
 SYSTEM_THREAD(ENABLED);                             // Means my code will not be held up by Particle processes.
 STARTUP(System.enableFeature(FEATURE_RESET_INFO));
 
-
-
 // Particle Product definitions
-PRODUCT_ID(4441);                                   // Connected Counter Header
-PRODUCT_VERSION(14);
+PRODUCT_ID(11313);                                   // Connected Counter Dual Product group
+PRODUCT_VERSION(1);
 #define DSTRULES isDSTusa
-const char releaseNumber[4] = "14";                  // Displays the release on the menu 
-/*
- PRODUCT_ID(10089);                                  // Santa Cruz Counter
- PRODUCT_VERSION(3);
- #define DSTRULES isDSTusa
- const char releaseNumber[6] = "4";                  // Displays the release on the menu 
+const char releaseNumber[4] = "1.5";                  // Displays the release on the menu 
 
- PRODUCT_ID(10343);                                  // Xyst Counters
- PRODUCT_VERSION(3);
- #define DSTRULES isDSTnz
- const char releaseNumber[6] = "3";                  // Displays the release on the menu 
- */
 
 // Constants
 
@@ -159,9 +123,9 @@ const int donePin =       D6;                       // Pin the Electron uses to 
 const int blueLED =       D7;                       // This LED is on the Electron itself
 const int userSwitch =    D5;                       // User switch with a pull-up resistor
 // Pin Constants - Sensor
-const int intPin =        B1;                       // Pressure Sensor inerrupt pin
-const int analogIn =      B2;                       // This pin sees the raw output of the pressure sensor
-const int disableModule = B3;                       // Bringining this low turns on the sensor (pull-up on sensor board)
+const int intPin1 =       B1;                       // Pressure Sensor #1 interrupt pin - This is the tube across 1/2 the road that counts cars "In"
+const int intPin2 =       B3;                       // Pressure Sensor #2 interrupt pin - This sensor is across the whole road and is used to count cars "out"
+const int disableModule = B2;                       // Bringining this low turns on the sensor (pull-up on sensor board)
 const int ledPower =      B4;                       // Allows us to control the indicator LED on the sensor board
 
 // Timing Constants
@@ -208,11 +172,15 @@ char powerContext[24];                              // One word that describes w
 // Sensor Variables
 u_int16_t debounce;                                 // This is the numerical value of debounce - in millis()
 char debounceStr[8] = "NA";                         // String to make debounce more readable on the mobile app
-volatile bool sensorDetect = false;                 // This is the flag that an interrupt is triggered
-unsigned long currentEvent = 0;                     // Time for the current sensor event
-int hourlyEventCount = 0;                          // hourly counter
-int hourlyEventCountSent = 0;                      // Person count in flight to Ubidots
-int dailyEventCount = 0;                           // daily counter
+volatile bool sensor1Detect = false;                // This is the flag that an interrupt is triggered on sensor 1
+volatile bool sensor2Detect = false;                // This is the flag that an interrupt is triggered on sensor 2
+unsigned long sensor2DetectStamp = 0;               // Time stamp when the last sensor2 detect came through
+int hourlyEventCount = 0;                           // hourly counter
+int hourlyEventCountSent = 0;                       // Person count in flight to Ubidots
+int currentNetCountSent = 0;                        // Keep track for adaptive reporting
+int dailyEventCount = 0;                            // daily counter
+int currentNetCount = 0;                            // Net count when you have two sensors and are tracking in - out
+bool frontTireFlag = false;                         // Implmenting back tire counting for outbound tube
 // Diagnostic Variables
 int alerts = 0;                                     // Alerts are triggered when MaxMinLimit is exceeded or a reset due to errors
 int maxMin = 0;                                     // What is the current maximum count in a minute for this reporting period
@@ -235,7 +203,6 @@ void setup()                                        // Note: Disconnected Setup(
     to determine which of the three we are in and finish the code
   */
   pinMode(wakeUpPin,INPUT);                         // This pin is active HIGH
-  pinMode(analogIn,INPUT);                          // Not used but don't want it floating
   pinMode(userSwitch,INPUT);                        // Momentary contact button on board for direct user input
   pinMode(blueLED, OUTPUT);                         // declare the Blue LED Pin as an output
   digitalWrite(blueLED,HIGH);                       // Turn on the Blue LED for Startup
@@ -244,7 +211,8 @@ void setup()                                        // Note: Disconnected Setup(
   pinResetFast(donePin);
   pinResetFast(hardResetPin);
   // Pressure / PIR Module Pin Setup
-  pinMode(intPin,INPUT_PULLDOWN);                   // pressure sensor interrupt
+  pinMode(intPin1,INPUT_PULLDOWN);                  // pressure sensor interrupt #1
+  pinMode(intPin2,INPUT_PULLDOWN);                  // Pressure sensor interrupt #2
   pinMode(disableModule,OUTPUT);                    // Turns on the module when pulled low
   pinResetFast(disableModule);                      // Turn on the module - send high to switch off board
   pinMode(ledPower,OUTPUT);                         // Turn on the lights
@@ -255,7 +223,11 @@ void setup()                                        // Note: Disconnected Setup(
   petWatchdog();                                    // Pet the watchdog - not necessary in a power on event but just in case
   attachInterrupt(wakeUpPin, watchdogISR, RISING);  // The watchdog timer will signal us and we have to respond
 
-  Particle.subscribe(System.deviceID() + "/hook-response/Ubidots-Counter-Hook-v1/", UbidotsHandler, MY_DEVICES);
+  char responseTopic[125];
+  String deviceID = System.deviceID();              // Multiple devices share the same hook - keeps things straight
+  deviceID.toCharArray(responseTopic,125);          // Puts the deviceID into the response topic array
+  Particle.subscribe(responseTopic, UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
+
 
   Particle.variable("HourlyCount", hourlyEventCount);                   // Define my Particle variables
   Particle.variable("DailyCount", dailyEventCount);                     // Note: Don't have to be connected for any of this!!!
@@ -271,6 +243,7 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.variable("MaxMinLimit",maxMinLimit);
   Particle.variable("Alerts",alerts);
   Particle.variable("TimeOffset",currentOffsetStr);
+  Particle.variable("NetCarCount",currentNetCount);
 
   Particle.function("resetFRAM", resetFRAM);                            // These are the functions exposed to the mobile app and console
   Particle.function("resetCounts",resetCounts);
@@ -285,6 +258,7 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.function("Set-Close",setCloseTime);
   Particle.function("Set-Debounce",setDebounce);
   Particle.function("Set-MaxMin-Limit",setMaxMinLimit);
+  Particle.function("Set-Net-Count",setNetCount);
 
   // Load the elements for improving troubleshooting and reliability
   connectionEvents.setup();                                             // For logging connection event data
@@ -347,6 +321,7 @@ void setup()                                        // Note: Disconnected Setup(
   time_t unixTime = FRAMread32(FRAM::currentCountsTimeAddr);            // Need to reload last recorded event - current periods set from this event
   dailyEventCount = FRAMread16(FRAM::currentDailyCountAddr);            // Load Daily Count from memory
   hourlyEventCount = FRAMread16(FRAM::currentHourlyCountAddr);          // Load Hourly Count from memory
+  currentNetCount = FRAMread16(FRAM::currentNetCountAddr);              // Load the current net count
 
   if (!digitalRead(userSwitch)) {                                       // Rescue mode to locally take lowPowerMode so you can connect to device
     lowPowerMode = false;                                               // Press the user switch while resetting the device
@@ -370,9 +345,11 @@ void setup()                                        // Note: Disconnected Setup(
     resetEverything();                                                // Zero the counts for the new day
     if (solarPowerMode && !lowPowerMode) setLowPowerMode("1");        // If we are running on solar, we will reset to lowPowerMode at Midnight
   }
+
   if ((currentHourlyPeriod > closeTime || currentHourlyPeriod < openTime)) {}         // The park is closed - sleep
   else {                                                              // Park is open let's get ready for the day
-    attachInterrupt(intPin, sensorISR, RISING);                       // Pressure Sensor interrupt from low to high
+    attachInterrupt(intPin1, sensor1ISR, RISING);                      // Pressure Sensor 1 interrupt from low to high
+    attachInterrupt(intPin2, sensor2ISR, RISING);                      // Second sensor
     if (connectionMode) connectToParticle();                          // Only going to connect if we are in connectionMode
     stayAwake = stayAwakeLong;                                        // Keeps Electron awake after reboot - helps with recovery
   }
@@ -389,7 +366,8 @@ void loop()
   case IDLE_STATE:                                                    // Where we spend most time - note, the order of these conditionals is important
     if (verboseMode && state != oldState) publishStateTransition();
     if (watchdogFlag) petWatchdog();                                  // Watchdog flag is raised - time to pet the watchdog
-    if (sensorDetect) recordCount();                                  // The ISR had raised the sensor flag
+    if (millis() - sensor2DetectStamp > 4 * debounce && frontTireFlag) sensor2Detect = true;  // Catch a single tire crossing which is left hanging.
+    if (sensor1Detect || sensor2Detect) recordCount();                // One or both ISRs had raised the sensor flag
     if (hourlyEventCountSent) {                                      // Cleared here as there could be counts coming in while "in Flight"
       hourlyEventCount -= hourlyEventCountSent;                     // Confirmed that count was recevied - clearing
       FRAMwrite16(FRAM::currentHourlyCountAddr, static_cast<uint16_t>(hourlyEventCount));  // Load Hourly Count to memory
@@ -405,7 +383,7 @@ void loop()
 
   case SLEEPING_STATE: {                                              // This state is triggered once the park closes and runs until it opens
     if (verboseMode && state != oldState) publishStateTransition();
-    detachInterrupt(intPin);                                          // Done sensing for the day
+    detachInterrupt(intPin1);                                          // Done sensing for the day
     pinSetFast(disableModule);                                        // Turn off the pressure module for the hour
     if (hourlyEventCount) {                                          // If this number is not zero then we need to send this last count
       state = REPORTING_STATE;
@@ -420,7 +398,8 @@ void loop()
 
   case NAPPING_STATE: {  // This state puts the device in low power mode quickly
     if (verboseMode && state != oldState) publishStateTransition();
-    if (sensorDetect) break;                                          // Don't nap until we are done with event
+    if (frontTireFlag) sensor2Detect = true;
+    if (sensor1Detect || sensor2Detect) break;                                          // Don't nap until we are done with event
     if ((0b00010000 & controlRegisterValue)) {                        // If we are in connected mode
       disconnectFromParticle();                                       // Disconnect from Particle
       controlRegisterValue = FRAMread8(FRAM::controlRegisterAddr);    // Get the control register (general approach)
@@ -431,8 +410,8 @@ void loop()
     (debounce < 1000) ? stayAwake = 1000 : stayAwake = debounce;      // Once we come into this function, we need to reset stayAwake as it changes at the top of the hour                                                 
     int wakeInSeconds = constrain(wakeBoundary - Time.now() % wakeBoundary, 1, wakeBoundary);
     petWatchdog();                                                    // Reset the watchdog
-    System.sleep(intPin, RISING, wakeInSeconds);                      // Sensor will wake us with an interrupt or timeout at the hour
-    if (sensorDetect) {
+    System.sleep({intPin1,intPin2},RISING,wakeInSeconds);                                             // Sensor will wake us with an interrupt or timeout at the hour
+    if (sensor1Detect || sensor2Detect) {
        awokeFromNap=true;                                             // Since millis() stops when sleeping - need this to debounce
        stayAwakeTimeStamp = millis();
     }
@@ -511,18 +490,8 @@ int resetFRAM(String command)                                           // Will 
 }
 
 int resetCounts(String command) {                                       // Resets the current hourly and daily counts
-
   if (command == "1") {
-    FRAMwrite16(FRAM::currentDailyCountAddr, 0);                        // Reset Daily Count in memory
-    FRAMwrite16(FRAM::currentHourlyCountAddr, 0);                       // Reset Hourly Count in memory
-    FRAMwrite8(FRAM::resetCountAddr,0);                                 // If so, store incremented number - watchdog must have done This
-    FRAMwrite8(FRAM::alertsCountAddr,0);
-    alerts = 0;
-    resetCount = 0;
-    hourlyEventCount = 0;                                               // Reset count variables
-    dailyEventCount = 0;
-    hourlyEventCountSent = 0;                                           // In the off-chance there is data in flight
-    dataInFlight = false;
+    resetEverything();
     return 1;
   }
   else return 0;
@@ -567,11 +536,13 @@ int sendNow(String command) {                                           // Funct
 void resetEverything() {                                                // The device is waking up in a new day or is a new install
   FRAMwrite16(FRAM::currentDailyCountAddr, 0);                          // Reset the counts in FRAM as well
   FRAMwrite16(FRAM::currentHourlyCountAddr, 0);
+  FRAMwrite16(FRAM::currentNetCountAddr,0);
   FRAMwrite32(FRAM::currentCountsTimeAddr,Time.now());                  // Set the time context to the new day
   FRAMwrite8(FRAM::resetCountAddr,0);
   FRAMwrite8(FRAM::alertsCountAddr,0);
   FRAMwrite8(FRAM::alertsCountAddr,0);
-  hourlyEventCount = dailyEventCount = resetCount = alerts = 0;         // Reset everything for the day
+  hourlyEventCount = hourlyEventCountSent = dailyEventCount = currentNetCount = resetCount = alerts = 0;         // Reset everything for the day
+  dataInFlight = false;
 }
 
 int setSolarMode(String command) {                                      // Function to force sending data in current hour
@@ -737,57 +708,83 @@ int setMaxMinLimit(String command) {                                    // This 
   return 1;
 }
 
+int setNetCount(String command) {                                       // Set the park opening time in local 
+  char * pEND;
+  char data[256];
+  int tempCount = strtol(command,&pEND,10);                              // Looks for the first integer and interprets it
+  if ((tempCount < 0) || (tempCount > dailyEventCount)) return 0;                      // Make sure it falls in a valid range or send a "fail" result
+  currentNetCount = tempCount;
+  FRAMwrite16(FRAM::currentNetCountAddr,currentNetCount);                              // Store the new value in FRAMwrite8
+  snprintf(data, sizeof(data), "Net count is set to %i",currentNetCount);
+  waitUntil(meterParticlePublish);
+  if (Particle.connected()) Particle.publish("Net",data, PRIVATE);
+  return 1;
+}
+
 // Here are the primary "business" functions that are specific to this devices function
 void recordCount() // This is where we check to see if an interrupt is set when not asleep or act on a tap that woke the Arduino
 {
   static int currentMinuteCount = 0;                                  // What is the count for the current minute
   static byte currentMinutePeriod;                                    // Current minute
+  static unsigned long currentEvent1 = 0;                             // Time for the current sensor 1 event
 
   pinSetFast(blueLED);                                                // Turn on the blue LED
 
-  if (millis() - currentEvent >= debounce || awokeFromNap) {          // If this event is outside the debounce time, proceed
-    currentEvent = millis();
-    awokeFromNap = false;                                             // Reset the awoke flag
-    while(millis()-currentEvent < debounce) {                         // Keep us tied up here until the debounce time is up
-      delay(10);
-      Particle.process();                                             // Just in case debouce gets set to some big number
-    }
+  if (sensor1Detect) {
+    if (millis() - currentEvent1 >= debounce || awokeFromNap) {          // If this event is outside the debounce time, proceed
+        currentEvent1 = millis();
+        awokeFromNap = false;                                             // Reset the awoke flag
 
-    // Diagnostic code
-    if (currentMinutePeriod != Time.minute()) {                       // Done counting for the last minute
-      currentMinutePeriod = Time.minute();                            // Reset period
-      currentMinuteCount = 1;                                         // Reset for the new minute
-    }
-    else currentMinuteCount++;
+        // Diagnostic code
+        if (currentMinutePeriod != Time.minute()) {                       // Done counting for the last minute
+          currentMinutePeriod = Time.minute();                            // Reset period
+          currentMinuteCount = 1;                                         // Reset for the new minute
+        }
+        else currentMinuteCount++;
 
-    if (currentMinuteCount >= maxMin) maxMin = currentMinuteCount;    // Save only if it is the new maxMin
-    // End diagnostic code
+        if (currentMinuteCount >= maxMin) maxMin = currentMinuteCount;    // Save only if it is the new maxMin
+        // End diagnostic code
 
-    // Set an alert if we exceed the MaxMinLimit
-    if (currentMinuteCount >= maxMinLimit) {
-      if (verboseMode && Particle.connected()) {
-        waitUntil(meterParticlePublish);
-        Particle.publish("Alert", "Exceeded Maxmin limit", PRIVATE);
-      }
-      alerts++;
-      FRAMwrite8(FRAM::alertsCountAddr,alerts);                        // Save counts in case of reset
-    }
+        // Set an alert if we exceed the MaxMinLimit
+        if (currentMinuteCount >= maxMinLimit) {
+          if (verboseMode && Particle.connected()) {
+            waitUntil(meterParticlePublish);
+            Particle.publish("Alert", "Exceeded Maxmin limit", PRIVATE);
+          }
+          alerts++;
+          FRAMwrite8(FRAM::alertsCountAddr,alerts);                        // Save counts in case of reset
+        }
 
-    hourlyEventCount++;                                                // Increment the PersonCount
-    FRAMwrite16(FRAM::currentHourlyCountAddr, hourlyEventCount);       // Load Hourly Count to memory
-    dailyEventCount++;                                                 // Increment the PersonCount
-    FRAMwrite16(FRAM::currentDailyCountAddr, dailyEventCount);         // Load Daily Count to memory
-    FRAMwrite32(FRAM::currentCountsTimeAddr, Time.now());              // Write to FRAM - this is so we know when the last counts were saved
-    if (verboseMode && Particle.connected()) {
-      char data[256];                                                    // Store the date in this character array - not global
-      snprintf(data, sizeof(data), "Count, hourly: %i, daily: %i",hourlyEventCount,dailyEventCount);
-      waitUntil(meterParticlePublish);
-      Particle.publish("Count",data, PRIVATE);                                   // Helpful for monitoring and calibration
+        hourlyEventCount++;                                                // Increment the PersonCount
+        FRAMwrite16(FRAM::currentHourlyCountAddr, hourlyEventCount);       // Load Hourly Count to memory
+        dailyEventCount++;                                                 // Increment the PersonCount
+        FRAMwrite16(FRAM::currentDailyCountAddr, dailyEventCount);         // Load Daily Count to memory
+        currentNetCount +=2;                                               // The "In" tube counts twice as it is only across 1/2 the road
+        FRAMwrite32(FRAM::currentCountsTimeAddr, Time.now());              // Write to FRAM - this is so we know when the last counts were saved   
     }
+    sensor1Detect = false;                                                 // Reset the flag
   }
-  else if(verboseMode && Particle.connected()) {
-    waitUntil(meterParticlePublish);
-    Particle.publish("Event","Debounced", PRIVATE);
+
+  if (sensor2Detect) {
+    sensor2DetectStamp = millis();                                       // Take a time stamp to ensure we don't miss a count out.
+    if (frontTireFlag) {                                                 // If the front tire has already passed, then proceed to count
+      frontTireFlag = false;
+      currentNetCount--;                                                 // The "Out" tube counts one as it counts both lanes
+      if (currentNetCount < 0) currentNetCount = 0;                      // Can't go negative
+      FRAMwrite16(FRAM::currentNetCountAddr,currentNetCount);            // Store in FRAM
+
+      // Adaptive rate reporting - net change in 20 from last sent value
+      if (abs(currentNetCountSent - currentNetCount) >= 20) state= REPORTING_STATE;
+
+      if (verboseMode && Particle.connected()) {
+        char data[256];                                                  // Store the date in this character array - not global
+        snprintf(data, sizeof(data), "Count, hourly: %i, daily: %i, net: %i",hourlyEventCount,dailyEventCount,currentNetCount);
+        waitUntil(meterParticlePublish);
+        Particle.publish("Count",data, PRIVATE);                         // Helpful for monitoring and calibration
+      }
+    }
+    else frontTireFlag = true;
+    sensor2Detect = false;                                               // Reset the flag
   }
 
   if (!digitalRead(userSwitch)) {                     // A low value means someone is pushing this button - will trigger a send to Ubidots and take out of low power mode
@@ -802,19 +799,19 @@ void recordCount() // This is where we check to see if an interrupt is set when 
     connectionMode = true;
   }
   pinResetFast(blueLED);
-  sensorDetect = false;                                               // Reset the flag
 }
 
 
 void sendEvent()
 {
   char data[256];                                                     // Store the date in this character array - not global
-  snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i, \"battery\":%i, \"key1\":\"%s\", \"temp\":%i, \"resets\":%i, \"alerts\":%i, \"maxmin\":%i}",hourlyEventCount, dailyEventCount, stateOfCharge, powerContext, temperatureF, resetCount, alerts, maxMin);
-  Particle.publish("Ubidots-Counter-Hook-v1", data, PRIVATE);
+  snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i, \"net\":%i, \"battery\":%i, \"key1\":\"%s\", \"temp\":%i, \"resets\":%i, \"alerts\":%i, \"maxmin\":%i}",hourlyEventCount, dailyEventCount, currentNetCount, stateOfCharge, powerContext, temperatureF, resetCount, alerts, maxMin);
+  Particle.publish("Ubidots-Counter-Hook-Dual", data, PRIVATE);
   webhookTimeStamp = millis();
   currentHourlyPeriod = Time.hour();                                  // Change the time period
-  if(currentHourlyPeriod == 23) hourlyEventCount++;                  // Ensures we don't have a zero here at midnigtt
-  hourlyEventCountSent = hourlyEventCount;                          // This is the number that was sent to Ubidots - will be subtracted once we get confirmation
+  if(currentHourlyPeriod == 23) hourlyEventCount++;                   // Ensures we don't have a zero here at midnigtt
+  hourlyEventCountSent = hourlyEventCount;                            // This is the number that was sent to Ubidots - will be subtracted once we get confirmation
+  currentNetCountSent = currentNetCount;                              // What did we last send.  
   dataInFlight = true;                                                // set the data inflight flag
 }
 
@@ -898,8 +895,12 @@ int getTemperature() {
 
 // Here are the various hardware and timer interrupt service routines
 // These are supplemental or utility functions
-void sensorISR() {
-  sensorDetect = true;                              // sets the sensor flag for the main loop
+void sensor1ISR() {
+  sensor1Detect = true;                                             // sets the sensor flag for the main loop
+}
+
+void sensor2ISR() {                                                 // ISR for the second sensor
+  sensor2Detect = true;
 }
 
 void watchdogISR() {
@@ -907,7 +908,7 @@ void watchdogISR() {
 }
 
 void petWatchdog() {
-  digitalWriteFast(donePin, HIGH);                                        // Pet the watchdog
+  digitalWriteFast(donePin, HIGH);                                  // Pet the watchdog
   digitalWriteFast(donePin, LOW);
   watchdogFlag = false;
 }
@@ -935,7 +936,7 @@ bool connectToParticle() {
   Particle.connect();
   // wait for *up to* 5 minutes
   for (int retry = 0; retry < 300 && !waitFor(Particle.connected,1000); retry++) {
-    if(sensorDetect) recordCount(); // service the interrupt every second
+    if(sensor1Detect || sensor2Detect) recordCount(); // service the interrupt every second
     Particle.process();
   }
   if (Particle.connected()) {
@@ -952,7 +953,7 @@ bool connectToParticle() {
 bool disconnectFromParticle() {                                         // Ensures we disconnect cleanly from Particle
   Particle.disconnect();
   for (int retry = 0; retry < 15 && !waitFor(notConnected, 1000); retry++) {  // make sure before turning off the cellular modem
-    if(sensorDetect) recordCount(); // service the interrupt every second
+    if(sensor1Detect || sensor2Detect) recordCount(); // service the interrupt every second
     Particle.process();
   }
   Cellular.off();
