@@ -1,6 +1,6 @@
 {
     "C_Cpp.default.configurationProvider": "particle.particle-vscode-core",
-    "particle.targetDevice": "Umstead-40",
+    "particle.targetDevice": "Electron-Dev",
     "particle.firmwareVersion": "1.5.1",
     "particle.targetPlatform": "electron",
     "cortex-debug.openocdPath": "${command:particle.getDebuggerOpenocdPath}"
